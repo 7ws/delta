@@ -163,6 +163,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 4.1.3: Describe the outcome (why or what capability), not the process (how).
 - 4.1.4: Do not use process verbs such as "Convert", "Migrate", "Refactor", or "Reorganise".
 - 4.1.5: Use outcome verbs such as "Use", "Support", "Enable", "Fix", "Add", "Remove", or "Prevent".
+- 4.1.6: The title must describe the user-facing outcome or problem solved, not the implementation approach. Ask "What problem does this solve?" not "What did I change?"
 
 ## 4.2 Title Content
 
