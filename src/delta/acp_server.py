@@ -70,7 +70,12 @@ from delta.compliance import (
     build_compliance_prompt,
     parse_compliance_response,
 )
-from delta.guidelines import AgentsDocument, find_agents_md, parse_agents_md
+from delta.guidelines import (
+    AgentsDocument,
+    find_agents_md,
+    get_bundled_agents_md,
+    parse_agents_md,
+)
 from delta.llm import LLMClient, get_llm_client
 
 logger = logging.getLogger(__name__)
@@ -297,14 +302,24 @@ class DeltaAgent(Agent):
             return f"Call {tool_name}({params_str})"
 
     def _load_agents_md(self, cwd: Path | None = None) -> None:
-        """Load or reload AGENTS.md."""
+        """Load or reload AGENTS.md.
+
+        Searches for AGENTS.md in the following order:
+        1. Explicit path provided via constructor
+        2. Target codebase (searching upward from cwd)
+        3. Bundled AGENTS.md shipped with Delta (fallback)
+        """
         if self.agents_md_path is None:
             if self._explicit_agents_md_path is not None:
                 self.agents_md_path = self._explicit_agents_md_path
             else:
                 self.agents_md_path = find_agents_md(cwd)
-        if self.agents_md_path is None:
-            raise FileNotFoundError("AGENTS.md not found in directory tree")
+                if self.agents_md_path is None:
+                    # Fall back to bundled AGENTS.md
+                    self.agents_md_path = get_bundled_agents_md()
+                    logger.info(
+                        f"No AGENTS.md in target codebase, using bundled: {self.agents_md_path}"
+                    )
         self.agents_doc = parse_agents_md(self.agents_md_path)
 
     async def _perform_compliance_review(

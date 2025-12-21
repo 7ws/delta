@@ -132,3 +132,24 @@ def find_agents_md(start_path: Path | None = None) -> Path | None:
         return root_agents
 
     return None
+
+
+def get_bundled_agents_md() -> Path:
+    """Get the path to the bundled AGENTS.md shipped with Delta.
+
+    Returns:
+        Path to the bundled AGENTS.md file.
+
+    Raises:
+        FileNotFoundError: If the bundled file is missing (installation issue).
+    """
+    # Get the directory where this module is installed
+    module_dir = Path(__file__).parent
+    bundled_path = module_dir / "AGENTS.md"
+
+    if bundled_path.exists():
+        return bundled_path
+
+    raise FileNotFoundError(
+        "Bundled AGENTS.md not found. This indicates a Delta installation issue."
+    )
