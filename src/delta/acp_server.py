@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from acp import (
 )
 from acp.interfaces import Agent, Client
 from acp.schema import (
+    AgentCapabilities,
     AudioContentBlock,
     AuthenticateResponse,
     BlobResourceContents,
@@ -41,6 +43,7 @@ from acp.schema import (
     LoadSessionResponse,
     McpServerStdio,
     PermissionOption,
+    PromptCapabilities,
     ResourceContentBlock,
     SetSessionModelResponse,
     SetSessionModeResponse,
@@ -125,53 +128,100 @@ PromptBlock = (
 )
 
 
-def _extract_prompt_text(blocks: list[PromptBlock], cwd: Path | None = None) -> str:
-    """Extract text content from prompt blocks.
+def _extract_prompt_content(
+    blocks: list[PromptBlock], cwd: Path | None = None
+) -> list[dict[str, Any]]:
+    """Extract content blocks from prompt for Claude API.
 
-    Handles text blocks, embedded resources, and resource links.
+    Converts ACP prompt blocks to Claude API content format, supporting
+    text, images, and embedded resources.
+
+    Returns:
+        List of Claude API content blocks (text and image types).
     """
-    parts: list[str] = []
+    content: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+
+    def flush_text() -> None:
+        """Add accumulated text as a content block."""
+        if text_parts:
+            content.append({"type": "text", "text": "\n\n".join(text_parts)})
+            text_parts.clear()
 
     for block in blocks:
         if isinstance(block, dict):
             # Handle dict-style blocks
             block_type = block.get("type")
             if block_type == "text":
-                parts.append(block.get("text", ""))
+                text_parts.append(block.get("text", ""))
+            elif block_type == "image":
+                flush_text()
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": block.get("mimeType", block.get("mime_type", "image/png")),
+                        "data": block.get("data", ""),
+                    },
+                })
             elif block_type == "resource":
                 resource = block.get("resource", {})
                 uri = resource.get("uri", "")
                 text = resource.get("text")
                 if text:
-                    parts.append(f'<file uri="{uri}">\n{text}\n</file>')
+                    text_parts.append(f'<file uri="{uri}">\n{text}\n</file>')
             elif block_type == "resource_link":
                 uri = block.get("uri", "")
                 name = block.get("name", uri)
                 file_content = _read_resource_link(uri, cwd)
                 if file_content:
-                    parts.append(f'<file uri="{uri}" name="{name}">\n{file_content}\n</file>')
+                    text_parts.append(
+                        f'<file uri="{uri}" name="{name}">\n{file_content}\n</file>'
+                    )
                 else:
-                    parts.append(f"[Referenced file: {name} ({uri})]")
+                    text_parts.append(f"[Referenced file: {name} ({uri})]")
+        elif isinstance(block, ImageContentBlock):
+            flush_text()
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": block.mime_type,
+                    "data": block.data,
+                },
+            })
         elif isinstance(block, TextContentBlock):
-            parts.append(block.text)
+            text_parts.append(block.text)
         elif isinstance(block, EmbeddedResourceContentBlock):
             resource = block.resource
             if isinstance(resource, TextResourceContents):
-                parts.append(f'<file uri="{resource.uri}">\n{resource.text}\n</file>')
+                text_parts.append(f'<file uri="{resource.uri}">\n{resource.text}\n</file>')
             elif isinstance(resource, BlobResourceContents):
-                parts.append(f"[Binary file: {resource.uri}]")
+                text_parts.append(f"[Binary file: {resource.uri}]")
         elif isinstance(block, ResourceContentBlock):
             file_content = _read_resource_link(block.uri, cwd)
             if file_content:
-                parts.append(
+                text_parts.append(
                     f'<file uri="{block.uri}" name="{block.name}">\n{file_content}\n</file>'
                 )
             else:
-                parts.append(f"[Referenced file: {block.name} ({block.uri})]")
+                text_parts.append(f"[Referenced file: {block.name} ({block.uri})]")
         elif hasattr(block, "text"):
-            parts.append(str(getattr(block, "text", "")))
+            text_parts.append(str(getattr(block, "text", "")))
 
-    return "\n\n".join(parts)
+    flush_text()
+    return content
+
+
+def _extract_prompt_text(blocks: list[PromptBlock], cwd: Path | None = None) -> str:
+    """Extract text content from prompt blocks.
+
+    Handles text blocks, embedded resources, and resource links.
+    Returns only the text portion, ignoring images.
+    """
+    content = _extract_prompt_content(blocks, cwd)
+    text_parts = [block["text"] for block in content if block.get("type") == "text"]
+    return "\n\n".join(text_parts)
 
 
 def _read_resource_link(uri: str, cwd: Path | None = None) -> str | None:
@@ -713,13 +763,31 @@ class DeltaAgent(Agent):
     async def _call_inner_agent(
         self,
         state: ComplianceState,
-        prompt: str,
+        prompt: str | list[dict[str, Any]],
         session_id: str,
     ) -> str:
-        """Call the inner agent and return its response."""
+        """Call the inner agent and return its response.
+
+        Args:
+            state: Compliance state for the session.
+            prompt: Either a string or list of Claude API content blocks.
+            session_id: ACP session identifier.
+        """
         client = await self._get_inner_client(state, session_id)
 
-        await client.query(prompt)
+        if isinstance(prompt, str):
+            await client.query(prompt)
+        else:
+            # For structured content (with images), create async message stream
+            async def message_stream() -> AsyncIterator[dict[str, Any]]:
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": prompt},
+                    "parent_tool_use_id": None,
+                    "session_id": "default",
+                }
+
+            await client.query(message_stream())
 
         response_text = ""
         tool_calls: dict[str, str] = {}  # tool_use_id -> tool_call_id for UI
@@ -778,7 +846,15 @@ class DeltaAgent(Agent):
     ) -> InitializeResponse:
         """Handle initialization request."""
         logger.info(f"Initializing with protocol version {protocol_version}")
-        return InitializeResponse(protocol_version=protocol_version)
+        return InitializeResponse(
+            protocol_version=protocol_version,
+            agent_capabilities=AgentCapabilities(
+                prompt_capabilities=PromptCapabilities(
+                    image=True,
+                    embedded_context=True,
+                ),
+            ),
+        )
 
     async def new_session(
         self,
@@ -857,6 +933,8 @@ class DeltaAgent(Agent):
         logger.info(f"Received prompt for session {session_id}")
         state = self._get_state(session_id)
 
+        # Extract structured content (supports images)
+        prompt_content = _extract_prompt_content(prompt, cwd=state.cwd)
         prompt_text = _extract_prompt_text(prompt, cwd=state.cwd)
 
         if not prompt_text.strip():
@@ -868,10 +946,14 @@ class DeltaAgent(Agent):
         state.reset()
         state.current_user_prompt = prompt_text
 
-        logger.info("Calling inner agent")
+        # Check if prompt contains images
+        has_images = any(block.get("type") == "image" for block in prompt_content)
+        inner_prompt: str | list[dict[str, Any]] = prompt_content if has_images else prompt_text
+
+        logger.info(f"Calling inner agent (has_images={has_images})")
 
         try:
-            await self._call_inner_agent(state, prompt_text, session_id)
+            await self._call_inner_agent(state, inner_prompt, session_id)
         except Exception as e:
             error_msg = f"Error: {e}"
             chunk = update_agent_message(text_block(error_msg))
