@@ -114,6 +114,41 @@ class ComplianceReport:
         return "\n".join(lines)
 
 
+LIGHTWEIGHT_REVIEW_PROMPT = """\
+You are a compliance reviewer performing a quick check on a READ-ONLY operation.
+
+Consider these guidelines:
+
+{agents_md_content}
+
+Now consider this action:
+
+> {proposed_action}
+
+This is a read-only operation (file read, search, or information gathering).
+Read operations are low-risk but must still follow guidelines about:
+- Reading files before proposing changes (2.1.1)
+- Researching existing patterns (2.1.2)
+- Not using interactive tools (2.5.1)
+
+Score this action: Does it fully comply with applicable guidelines?
+
+Output JSON:
+```json
+{{
+  "score": 5,
+  "compliant": true,
+  "reason": "Brief explanation"
+}}
+```
+
+Rules:
+- Score 5 and compliant=true if the action follows guidelines
+- Score below 5 and compliant=false if there is a violation
+- Be concise - this is a quick check, not a full audit
+"""
+
+
 COMPLIANCE_REVIEW_PROMPT = """\
 You are a compliance reviewer.
 Evaluate whether the proposed action complies with AGENTS.md guidelines.
@@ -208,13 +243,32 @@ SECTION CHECKLIST - Verify you included all of these:
 """
 
 
+def build_lightweight_prompt(
+    agents_doc: AgentsDocument,
+    proposed_action: str,
+) -> str:
+    """Build prompt for lightweight compliance review of read operations.
+
+    Args:
+        agents_doc: Parsed AGENTS.md document.
+        proposed_action: The read operation to evaluate.
+
+    Returns:
+        Formatted prompt for quick compliance check.
+    """
+    return LIGHTWEIGHT_REVIEW_PROMPT.format(
+        agents_md_content=agents_doc.raw_content,
+        proposed_action=proposed_action,
+    )
+
+
 def build_compliance_prompt(
     agents_doc: AgentsDocument,
     proposed_action: str,
     user_prompt: str = "",
     tool_history: list[str] | None = None,
 ) -> str:
-    """Build the prompt for compliance review.
+    """Build the prompt for full compliance review.
 
     Args:
         agents_doc: Parsed AGENTS.md document.
@@ -241,6 +295,51 @@ def build_compliance_prompt(
         proposed_action=proposed_action,
         section_checklist=section_checklist,
     )
+
+
+def parse_lightweight_response(response: str) -> ComplianceReport:
+    """Parse lightweight compliance review response.
+
+    Args:
+        response: Raw response from the lightweight reviewer.
+
+    Returns:
+        Simplified compliance report.
+    """
+    import json
+    import re
+
+    json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
+    if json_match:
+        json_str = json_match.group(1)
+    else:
+        json_start = response.find("{")
+        json_end = response.rfind("}") + 1
+        if json_start >= 0 and json_end > json_start:
+            json_str = response[json_start:json_end]
+        else:
+            raise ValueError("No JSON found in lightweight compliance response")
+
+    data = json.loads(json_str)
+
+    report = ComplianceReport(proposed_action=data.get("reason", "Read operation"))
+
+    # Create a single section for the lightweight review
+    score_value = data.get("score", 5)
+    is_compliant = data.get("compliant", True)
+
+    section = SectionScore(section_number=0, section_name="Quick Check")
+    section.guideline_scores.append(
+        GuidelineScore(
+            guideline_id="quick",
+            guideline_text="Lightweight review",
+            score=Score.FULL if is_compliant else Score(min(score_value, 4)),
+            justification=data.get("reason", ""),
+        )
+    )
+    report.section_scores.append(section)
+
+    return report
 
 
 def parse_compliance_response(response: str, agents_doc: AgentsDocument) -> ComplianceReport:

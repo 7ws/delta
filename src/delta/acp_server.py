@@ -70,7 +70,9 @@ from claude_agent_sdk import (
 from delta.compliance import (
     ComplianceReport,
     build_compliance_prompt,
+    build_lightweight_prompt,
     parse_compliance_response,
+    parse_lightweight_response,
 )
 from delta.guidelines import (
     AgentsDocument,
@@ -376,8 +378,16 @@ class DeltaAgent(Agent):
         state: ComplianceState,
         action: str,
         user_prompt: str = "",
+        lightweight: bool = False,
     ) -> ComplianceReport:
-        """Perform compliance review on a proposed action."""
+        """Perform compliance review on a proposed action.
+
+        Args:
+            state: Compliance state for the session.
+            action: The proposed action to review.
+            user_prompt: The user's original request.
+            lightweight: Use lightweight review for read operations.
+        """
         start_time = time.monotonic()
 
         self._load_agents_md()
@@ -385,10 +395,14 @@ class DeltaAgent(Agent):
         if self.agents_doc is None:
             raise RuntimeError("Failed to load AGENTS.md")
 
-        prompt = build_compliance_prompt(
-            self.agents_doc, action, user_prompt, state.tool_call_history
-        )
-        logger.debug(f"Compliance prompt length: {len(prompt)} chars")
+        if lightweight:
+            prompt = build_lightweight_prompt(self.agents_doc, action)
+            logger.debug(f"Lightweight compliance prompt length: {len(prompt)} chars")
+        else:
+            prompt = build_compliance_prompt(
+                self.agents_doc, action, user_prompt, state.tool_call_history
+            )
+            logger.debug(f"Full compliance prompt length: {len(prompt)} chars")
 
         llm_start = time.monotonic()
         # Run blocking LLM call in thread pool to avoid blocking the event loop
@@ -400,15 +414,20 @@ class DeltaAgent(Agent):
         llm_duration = time.monotonic() - llm_start
         logger.debug(f"LLM compliance review took {llm_duration:.2f}s")
 
-        report = parse_compliance_response(review_response, self.agents_doc)
+        if lightweight:
+            report = parse_lightweight_response(review_response)
+        else:
+            report = parse_compliance_response(review_response, self.agents_doc)
         report.proposed_action = action[:100] + "..." if len(action) > 100 else action
         report.attempt_number = state.current_attempt + 1
 
         state.record_attempt(report)
 
         total_duration = time.monotonic() - start_time
+        review_type = "lightweight" if lightweight else "full"
         logger.info(
-            f"Compliance review completed in {total_duration:.2f}s, compliant={report.is_compliant}"
+            f"Compliance review ({review_type}) completed in {total_duration:.2f}s, "
+            f"compliant={report.is_compliant}"
         )
 
         return report
@@ -455,6 +474,14 @@ class DeltaAgent(Agent):
                 tool_description = self._format_tool_action(tool_name, input_params)
                 logger.info(f"Tool call: {tool_name} - {tool_description}")
 
+                # Determine if this is a read-only operation (lightweight review)
+                read_only_tools = {
+                    "Read", "mcp__acp__Read",
+                    "Glob", "Grep",
+                    "Task",  # Task spawns subagents for exploration
+                }
+                is_read_only = tool_name in read_only_tools
+
                 try:
                     # Show progress as a native tool call block
                     review_id = f"review_{uuid4().hex[:8]}"
@@ -472,7 +499,10 @@ class DeltaAgent(Agent):
                     logger.debug("session_update completed")
 
                     report = await self._perform_compliance_review(
-                        state, tool_description, state.current_user_prompt
+                        state,
+                        tool_description,
+                        state.current_user_prompt,
+                        lightweight=is_read_only,
                     )
                     logger.info(f"Compliance review done: {report.is_compliant}")
 
