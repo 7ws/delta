@@ -501,12 +501,12 @@ class DeltaAgent(Agent):
 
                 # Compliance passed; request user permission
                 tool_call_id = f"tool_{uuid4().hex[:8]}"
-                file_or_cmd = input_params.get("file_path", input_params.get("command", ""))
 
                 # Build rich content for file operations
                 tool_content = None
                 tool_locations = None
                 tool_kind = None
+                tool_title = tool_description  # Use human-readable description
 
                 if tool_name in ("Write", "mcp__acp__Write"):
                     file_path = input_params.get("file_path", "")
@@ -515,6 +515,7 @@ class DeltaAgent(Agent):
                     tool_content = [tool_diff_content(file_path, new_text, old_text)]
                     tool_locations = [ToolCallLocation(path=file_path)]
                     tool_kind = "edit"
+                    tool_title = f"Write {file_path}"
 
                 elif tool_name in ("Edit", "mcp__acp__Edit"):
                     file_path = input_params.get("file_path", "")
@@ -527,24 +528,45 @@ class DeltaAgent(Agent):
                         tool_content = [tool_diff_content(file_path, new_text, old_text)]
                     tool_locations = [ToolCallLocation(path=file_path)]
                     tool_kind = "edit"
+                    tool_title = f"Edit {file_path}"
 
                 elif tool_name in ("Read", "mcp__acp__Read"):
                     file_path = input_params.get("file_path", "")
                     tool_locations = [ToolCallLocation(path=file_path)]
                     tool_kind = "read"
+                    tool_title = f"Read {file_path}"
 
                 elif tool_name in ("Bash", "mcp__acp__Bash"):
+                    command = input_params.get("command", "")
                     tool_kind = "execute"
+                    tool_title = f"Run {command}"
 
                 elif tool_name in ("Grep", "Glob"):
+                    pattern = input_params.get("pattern", "")
                     tool_kind = "search"
+                    tool_title = f"Search {pattern}"
 
                 elif tool_name == "WebFetch":
+                    url = input_params.get("url", "")
                     tool_kind = "fetch"
+                    tool_title = f"Fetch {url}"
 
+                # Send ToolCallStart to display the tool call in UI with diff
+                tool_start = start_tool_call(
+                    tool_call_id=tool_call_id,
+                    title=tool_title,
+                    kind=tool_kind,
+                    status="pending",
+                    content=tool_content,
+                    locations=tool_locations,
+                    raw_input=input_params,
+                )
+                await self._conn.session_update(session_id=session_id, update=tool_start)
+
+                # Build ToolCallUpdate for permission request
                 tool_call = ToolCallUpdate(
                     tool_call_id=tool_call_id,
-                    title=f"{tool_name}: {file_or_cmd}",
+                    title=tool_title,
                     kind=tool_kind,
                     content=tool_content,
                     locations=tool_locations,
@@ -574,7 +596,7 @@ class DeltaAgent(Agent):
                     ),
                 ]
 
-                logger.debug(f"Requesting user permission for {tool_name}: {file_or_cmd}")
+                logger.debug(f"Requesting user permission: {tool_title}")
                 response = await self._conn.request_permission(
                     options=options,
                     session_id=session_id,
@@ -592,13 +614,29 @@ class DeltaAgent(Agent):
                     logger.debug(f"User selected option: {selected_id}")
 
                     if selected_id in ("allow_once", "allow_always"):
+                        # Update tool call status to in_progress
+                        tool_progress = update_tool_call(
+                            tool_call_id=tool_call_id,
+                            status="in_progress",
+                        )
+                        await self._conn.session_update(
+                            session_id=session_id, update=tool_progress
+                        )
                         # Record allowed tool call in history for future compliance reviews
                         state.record_tool_call(tool_description, allowed=True)
                         return PermissionResultAllow(updated_input=input_params)
 
                     # User rejected (reject_once or reject_always) - interrupt
                     # and ask for clarification
-                    logger.warning(f"User rejected {tool_name}: {file_or_cmd} ({selected_id})")
+                    logger.warning(f"User rejected: {tool_title} ({selected_id})")
+                    # Update tool call status to failed
+                    tool_progress = update_tool_call(
+                        tool_call_id=tool_call_id,
+                        status="failed",
+                    )
+                    await self._conn.session_update(
+                        session_id=session_id, update=tool_progress
+                    )
                     state.record_tool_call(tool_description, allowed=False)
                     return PermissionResultDeny(
                         message=(
@@ -609,7 +647,15 @@ class DeltaAgent(Agent):
                     )
 
                 # Cancelled - prompt was dismissed without selection
-                logger.warning(f"Permission prompt cancelled for {tool_name}: {file_or_cmd}")
+                logger.warning(f"Permission prompt cancelled: {tool_title}")
+                # Update tool call status to failed
+                tool_progress = update_tool_call(
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                )
+                await self._conn.session_update(
+                    session_id=session_id, update=tool_progress
+                )
                 state.record_tool_call(tool_description, allowed=False)
                 return PermissionResultDeny(
                     message=(
