@@ -1121,13 +1121,19 @@ async def run_server(
     llm_model: str | None = None,
 ) -> None:
     """Run the Delta ACP server."""
+    from acp import stdio_streams
+
     agent = DeltaAgent(
         agents_md_path=agents_md_path,
         max_attempts=max_attempts,
         llm_provider=llm_provider,
         llm_model=llm_model,
     )
-    await run_agent(agent)
+
+    # Use larger buffer limit (16MB) to handle base64-encoded images
+    # Default 64KB limit causes crashes with image content
+    output_stream, input_stream = await stdio_streams(limit=16 * 1024 * 1024)
+    await run_agent(agent, input_stream=input_stream, output_stream=output_stream)
 
 
 def main() -> None:
