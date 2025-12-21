@@ -193,6 +193,20 @@ Evaluate the proposed action against EVERY major section in AGENTS.md. For each 
 3. Calculate the average score for the major section (excluding N/A scores)
 4. Provide a brief justification
 
+RECOVERY AND SELF-CORRECTION - CRITICAL:
+- When the agent's previous action FAILED (marked [DENIED] or [RUNTIME_ERROR]), and the
+  current action is a DIFFERENT approach to achieve the same goal, this is RECOVERY
+- Recovery is POSITIVE behaviour - the agent is self-correcting
+- Evaluate the NEW action on its own merits, not as a continuation of the failure
+- Do NOT penalise the agent for previous failed attempts when reviewing a recovery action
+- [RUNTIME_ERROR] entries indicate environmental failures (interactive mode unavailable,
+  file not found, network timeout) - these are NOT compliance violations
+- Example: If `git add -p` failed with [RUNTIME_ERROR] because interactive mode is
+  unavailable, and the agent now proposes `git add <file>`, evaluate `git add <file>`
+  independently - it is fully compliant (guideline 3.2.1 allows staging entire files
+  when all changes belong to commit)
+- The goal is to help the agent succeed, not to block it for trying alternatives
+
 HOLISTIC EVALUATION - CRITICAL:
 - Read and consider ALL guidelines before making a judgement
 - Guidelines within the same section may provide exceptions or context for each other

@@ -215,6 +215,48 @@ class OllamaClient(LLMClient):
             return str(result.get("response", ""))
 
 
+def get_fast_client() -> LLMClient:
+    """Get a fast LLM client for quick classifications.
+
+    Uses Claude Haiku via claude CLI for speed.
+    """
+    return ClaudeCodeClient(model="haiku")
+
+
+def classify_action_type(client: LLMClient, action: str) -> bool:
+    """Classify whether an action is read-only using a fast LLM.
+
+    Args:
+        client: Fast LLM client (e.g., Haiku).
+        action: The action description to classify.
+
+    Returns:
+        True if the action is read-only, False if it modifies state.
+    """
+    from textwrap import dedent
+
+    prompt = dedent(f"""\
+        Classify this action as READ-ONLY or READ-WRITE.
+
+        Action: {action}
+
+        READ-ONLY: Only reads data, no side effects
+        (e.g., git status, ls, cat, grep, git diff, gh pr list)
+
+        READ-WRITE: Modifies files, state, or has side effects
+        (e.g., git commit, rm, echo > file, git push)
+
+        Reply with exactly one word: READONLY or READWRITE\
+    """)
+
+    response = client.complete(
+        prompt=prompt,
+        system="You classify actions. Reply with exactly one word: READONLY or READWRITE",
+    )
+
+    return "READONLY" in response.upper()
+
+
 def get_llm_client(
     provider: str | None = None,
     model: str | None = None,

@@ -100,7 +100,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 2.5 Tools and Commands
 
-- 2.5.1: Do not use interactive CLI tools such as `less`, `vim`, `git rebase -i`, or `nano`.
+- 2.5.1: Do not use interactive CLI tools that block waiting for user input, such as `less`, `vim`, `git rebase -i`, or `nano`. Commands that accept input via stdin (for example, `git add -p` with scripted responses) are permitted.
 - 2.5.2: Use the `--no-pager` flag for git commands, such as `git --no-pager log` and `git --no-pager diff`.
 - 2.5.3: Double-check all work before presenting results.
 

@@ -9,6 +9,7 @@ Architecture: Editor <-> Delta (ACP) <-> Inner Agent (Claude Agent SDK)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -80,7 +81,7 @@ from delta.guidelines import (
     get_bundled_agents_md,
     parse_agents_md,
 )
-from delta.llm import LLMClient, get_llm_client
+from delta.llm import LLMClient, classify_action_type, get_fast_client, get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +250,16 @@ def _read_resource_link(uri: str, cwd: Path | None = None) -> str | None:
 
 @dataclass
 class ComplianceState:
-    """Track compliance state for a session."""
+    """Track compliance state for a session.
+
+    Architecture: The agent gets `max_attempts` tries to propose a compliant action.
+    After exhausting attempts, Delta resets the counter and provides actionable
+    guidance. The agent should either fix the issue or ask the user for clarification
+    if the feedback is unclear.
+
+    This design prevents infinite loops while allowing the agent to self-correct
+    when given clear feedback (e.g., "run pre-commit first").
+    """
 
     max_attempts: int = 3
     current_attempt: int = 0
@@ -260,13 +270,41 @@ class ComplianceState:
     cwd: Path | None = None
     current_user_prompt: str = ""
     tool_call_history: list[str] = field(default_factory=list)
+    last_failure_was_runtime: bool = False
 
     def record_attempt(self, report: ComplianceReport) -> None:
-        """Record a compliance attempt."""
+        """Record a compliance attempt.
+
+        Only compliance violations count toward the block threshold.
+        If the last failure was a runtime error and this attempt is compliant,
+        the agent successfully recovered - reset the attempt counter.
+        """
+        if report.is_compliant:
+            # Successful action - check if this is recovery from runtime error
+            if self.last_failure_was_runtime:
+                logger.info("Agent recovered from runtime error with compliant action")
+                self.current_attempt = 0
+                self.last_failure_was_runtime = False
+            return
+
+        # Non-compliant action
         self.current_attempt += 1
         self.previous_reports.append(report)
-        if self.current_attempt >= self.max_attempts and not report.is_compliant:
+        self.last_failure_was_runtime = False
+
+        if self.current_attempt >= self.max_attempts:
             self.blocked = True
+
+    def record_runtime_error(self, tool_description: str, error: str) -> None:
+        """Record a runtime error (not a compliance violation).
+
+        Runtime errors (interactive mode unavailable, file not found, etc.)
+        do not count toward the block threshold. They signal that the agent
+        should try a different approach.
+        """
+        self.last_failure_was_runtime = True
+        self.tool_call_history.append(f"[RUNTIME_ERROR] {tool_description}: {error}")
+        logger.info(f"Runtime error recorded (not counting toward block): {error}")
 
     def record_tool_call(self, tool_description: str, allowed: bool) -> None:
         """Record a tool call in the session history."""
@@ -278,6 +316,7 @@ class ComplianceState:
         self.current_attempt = 0
         self.blocked = False
         self.previous_reports.clear()
+        self.last_failure_was_runtime = False
         # NOTE: We don't clear tool_call_history - it persists across prompts
         # so the compliance reviewer knows what actions were taken earlier
 
@@ -379,6 +418,7 @@ class DeltaAgent(Agent):
         action: str,
         user_prompt: str = "",
         lightweight: bool = False,
+        progress_callback: Any = None,
     ) -> ComplianceReport:
         """Perform compliance review on a proposed action.
 
@@ -387,6 +427,7 @@ class DeltaAgent(Agent):
             action: The proposed action to review.
             user_prompt: The user's original request.
             lightweight: Use lightweight review for read operations.
+            progress_callback: Async callback(elapsed_seconds) to update progress UI.
         """
         start_time = time.monotonic()
 
@@ -394,6 +435,8 @@ class DeltaAgent(Agent):
 
         if self.agents_doc is None:
             raise RuntimeError("Failed to load AGENTS.md")
+
+        review_type = "quick" if lightweight else "full"
 
         if lightweight:
             prompt = build_lightweight_prompt(self.agents_doc, action)
@@ -405,12 +448,25 @@ class DeltaAgent(Agent):
             logger.debug(f"Full compliance prompt length: {len(prompt)} chars")
 
         llm_start = time.monotonic()
-        # Run blocking LLM call in thread pool to avoid blocking the event loop
-        review_response = await asyncio.to_thread(
-            self.llm_client.complete,
-            prompt=prompt,
-            system="You are a strict compliance reviewer. Output only valid JSON.",
+
+        # Run LLM call with progress updates
+        llm_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.llm_client.complete,
+                prompt=prompt,
+                system="You are a strict compliance reviewer. Output only valid JSON.",
+            )
         )
+
+        # Update progress every 0.5 seconds while waiting for LLM
+        while not llm_task.done():
+            elapsed = time.monotonic() - llm_start
+            if progress_callback:
+                await progress_callback(elapsed, review_type)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(llm_task), timeout=0.5)
+
+        review_response = await llm_task
         llm_duration = time.monotonic() - llm_start
         logger.debug(f"LLM compliance review took {llm_duration:.2f}s")
 
@@ -475,21 +531,30 @@ class DeltaAgent(Agent):
                 logger.info(f"Tool call: {tool_name} - {tool_description}")
 
                 # Determine if this is a read-only operation (lightweight review)
-                read_only_tools = {
+                # Known read-only tools get instant classification
+                known_read_only_tools = {
                     "Read", "mcp__acp__Read",
                     "Glob", "Grep",
                     "Task",  # Task spawns subagents for exploration
                 }
-                is_read_only = tool_name in read_only_tools
+                if tool_name in known_read_only_tools:
+                    is_read_only = True
+                else:
+                    # Use fast LLM (Haiku) to classify unknown actions
+                    fast_client = get_fast_client()
+                    is_read_only = await asyncio.to_thread(
+                        classify_action_type, fast_client, tool_description
+                    )
 
                 try:
                     # Show progress as a native tool call block
                     review_id = f"review_{uuid4().hex[:8]}"
+                    review_type_label = "quick" if is_read_only else "full"
                     logger.debug(f"Creating progress block: {review_id}")
                     sys.stderr.flush()
                     review_start = start_tool_call(
                         tool_call_id=review_id,
-                        title="Reviewing compliance...",
+                        title=f"Reviewing compliance ({review_type_label})...",
                         kind="think",
                         status="in_progress",
                     )
@@ -498,11 +563,23 @@ class DeltaAgent(Agent):
                     await self._conn.session_update(session_id=session_id, update=review_start)
                     logger.debug("session_update completed")
 
+                    # Progress callback to update UI with elapsed time
+                    async def update_progress(elapsed: float, review_type: str) -> None:
+                        title = f"Reviewing compliance ({review_type}, {elapsed:.1f}s)..."
+                        progress_update = update_tool_call(
+                            tool_call_id=review_id,
+                            title=title,
+                        )
+                        await self._conn.session_update(
+                            session_id=session_id, update=progress_update
+                        )
+
                     report = await self._perform_compliance_review(
                         state,
                         tool_description,
                         state.current_user_prompt,
                         lightweight=is_read_only,
+                        progress_callback=update_progress,
                     )
                     logger.info(f"Compliance review done: {report.is_compliant}")
 
@@ -535,22 +612,24 @@ class DeltaAgent(Agent):
                         chunk = update_agent_message(text_block(compliance_msg))
                         await self._conn.session_update(session_id=session_id, update=chunk)
 
-                        # After max_attempts failures, tell agent to ask for clarification
+                        # After max_attempts failures, guide the agent to fix or escalate
+                        # Architecture: 2 attempts to comply, then either guide (actionable)
+                        # or ask for clarification (ambiguous)
                         if state.blocked:
-                            interrupt_msg = (
-                                "\n\n**Blocked**: Too many compliance failures. "
-                                "Please clarify your request.\n"
-                            )
-                            chunk = update_agent_message(text_block(interrupt_msg))
-                            await self._conn.session_update(session_id=session_id, update=chunk)
+                            # Reset for another round - the feedback is actionable
+                            state.blocked = False
+                            state.current_attempt = 0
 
                             return PermissionResultDeny(
                                 message=(
-                                    "BLOCKED: You have failed compliance review multiple times. "
-                                    "STOP attempting this action. Instead, ask the user for "
-                                    "clarification about what they want you to do."
+                                    f"Compliance review failed after {self.max_attempts} "
+                                    f"attempts:\n{failing_text}\n\n"
+                                    "The compliance feedback above is actionable. "
+                                    "Address these issues before retrying this action. "
+                                    "If you cannot determine how to proceed, ask the user "
+                                    "for clarification."
                                 ),
-                                interrupt=True,
+                                interrupt=False,
                             )
 
                         return PermissionResultDeny(
@@ -864,6 +943,22 @@ class DeltaAgent(Agent):
                             await self._conn.session_update(
                                 session_id=session_id, update=tool_update
                             )
+
+                        # Record runtime errors so recovery attempts are not penalized
+                        if block.is_error:
+                            tool_use_id = block.tool_use_id
+                            # Extract error message from content
+                            error_msg = ""
+                            if isinstance(block.content, str):
+                                error_msg = block.content
+                            elif isinstance(block.content, list):
+                                for item in block.content:
+                                    if hasattr(item, "text"):
+                                        error_msg = item.text
+                                        break
+                            # Get the tool description from history if available
+                            tool_desc = f"tool_{tool_use_id[:8]}"
+                            state.record_runtime_error(tool_desc, error_msg)
 
         return response_text
 
