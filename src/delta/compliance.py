@@ -158,6 +158,16 @@ Evaluate the proposed action against EVERY major section in AGENTS.md. For each 
 3. Calculate the average score for the major section (excluding N/A scores)
 4. Provide a brief justification
 
+HOLISTIC EVALUATION - CRITICAL:
+- Read and consider ALL guidelines before making a judgement
+- Guidelines within the same section may provide exceptions or context for each other
+- When one guideline seems to conflict with another, the more specific guideline applies
+- Example: 4.2.2 says "one goal per commit" but 4.5.1 says "amend recent commits when
+  adding related fixes" - if the action is amending a commit with a related fix, 4.5.1
+  takes precedence because it is the more specific rule for that situation
+- Do NOT fixate on a single guideline - evaluate the complete picture
+- Consider the intent behind the guidelines, not just literal interpretation
+
 ## Required Output Format
 
 You MUST output a JSON object with this exact structure:

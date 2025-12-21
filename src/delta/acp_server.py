@@ -59,7 +59,6 @@ from claude_agent_sdk import (
     PermissionResultAllow,
     PermissionResultDeny,
     PreToolUseHookInput,
-    ResultMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -755,10 +754,8 @@ class DeltaAgent(Agent):
                         )
                         await self._conn.session_update(session_id=session_id, update=tool_start)
 
-            elif isinstance(message, ResultMessage):
-                # Handle tool results
-                for block in message.content:
-                    if isinstance(block, ToolResultBlock):
+                    elif isinstance(block, ToolResultBlock):
+                        # Update tool call status based on result
                         tool_call_id = tool_calls.get(block.tool_use_id)
                         if tool_call_id:
                             status = "failed" if block.is_error else "completed"
