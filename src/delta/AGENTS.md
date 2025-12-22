@@ -74,6 +74,8 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 2.1.2: Search the codebase exhaustively for existing patterns before implementing. Examine all candidates, not the first match.
 - 2.1.3: Research online (official documentation, GitHub issues, community forums) before making assumptions about framework conventions or best practices.
 - 2.1.4: Ask clarifying questions or state "I do not know" when uncertain. Do not speculate.
+- 2.1.5: Before implementing features or fixes, check for existing documentation and tests related to the affected code. Documentation and tests define expected behaviour and serve as the source of truth.
+- 2.1.6: Read test files to understand how the code is expected to behave. Tests document contracts that implementations must honour.
 
 ## 2.2 Scope and Focus
 
@@ -84,6 +86,8 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 2.2.5: Do not add error handling for scenarios that cannot happen. Trust internal code and framework guarantees.
 - 2.2.6: Do not create helpers, utilities, or abstractions for one-time operations.
 - 2.2.7: Do not design for hypothetical future requirements.
+- 2.2.8: Within the requested scope, be thorough. Complete all necessary changes without asking for permission to continue. If a change affects multiple files, update all affected files.
+- 2.2.9: Do not ask "Do you want me to..." for work that is clearly part of the requested task. Finish the job.
 
 ## 2.3 Warnings and Failures
 
@@ -100,9 +104,9 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 2.5 Tools and Commands
 
-- 2.5.1: Do not use interactive CLI tools such as `less`, `vim`, `git rebase -i`, or `nano`.
+- 2.5.1: Do not use interactive CLI tools that block waiting for user input, such as `less`, `vim`, `git rebase -i`, or `nano`. Commands that accept input via stdin (for example, `git add -p` with scripted responses) are permitted.
 - 2.5.2: Use the `--no-pager` flag for git commands, such as `git --no-pager log` and `git --no-pager diff`.
-- 2.5.3: Double-check all work before presenting results.
+- 2.5.3: Before running commands, examine the codebase to discover correct entrypoints. Check `pyproject.toml`, `package.json`, `Makefile`, or equivalent configuration files for test runners, linters, and build commands. Do not assume standard commands exist.
 
 ## 2.6 Guideline Violations
 
@@ -117,6 +121,16 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 2.7.3: After three failed attempts, stop and present findings to the user. Include what was tried, error outputs, and hypotheses for the failure.
 - 2.7.4: When blocked by missing information, permissions, or external dependencies, state the blocker and ask for guidance. Do not guess or work around.
 - 2.7.5: Set explicit timeouts for long-running commands. The default is 120 seconds. State when a command exceeds this duration.
+
+## 2.8 Documentation and Test Maintenance
+
+- 2.8.1: Documentation and tests are the north star for code implementation. They define what the code should do.
+- 2.8.2: When modifying code, update related documentation and tests in the same commit. Do not leave them out of sync.
+- 2.8.3: When existing tests fail after code changes, determine whether the test or the code is wrong. Tests may reveal unintended breaking changes.
+- 2.8.4: When implementing new features, write tests first when the expected behaviour is clear. Tests validate that the implementation meets requirements.
+- 2.8.5: When documentation does not exist for a significant feature or module, offer to create it. Phrase the offer concisely: "This module lacks documentation. Create it?"
+- 2.8.6: Do not create documentation unsolicited. Offer first; create only after user approval.
+- 2.8.7: Prioritise updating existing documentation over creating new files. Consolidate related information.
 
 
 ---
@@ -137,9 +151,10 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 3.2 Staging Files
 
-- 3.2.1: For modified files, stage only changes related to the current commit. Use `git add -p` to stage specific hunks when a file contains unrelated changes. Stage the entire file when all its changes belong to the commit.
-- 3.2.2: For untracked (new) files, use `git add <file>` to stage the whole file.
-- 3.2.3: Do not use `git add -A` or `git add .` under any circumstances.
+- 3.2.1: Before staging, inspect changes with `git status` and `git diff <file>` for each modified file. Determine whether all changes in each file relate to the current commit.
+- 3.2.2: Stage files and directories explicitly by name using `git add <file>` or `git add <directory>`.
+- 3.2.3: Do not use `git add -A` or `git add .`. These commands stage indiscriminately and may include unrelated changes.
+- 3.2.4: When a modified file contains unrelated changes, stage only relevant hunks. Run `false | git add -p <file>` to preview hunks, then `printf 'y\nn\nq\n' | git add -p <file>` to stage selectively. Do not run `git add -p` interactively.
 
 ## 3.3 Pre-Commit Verification
 
@@ -163,6 +178,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 4.1.3: Describe the outcome (why or what capability), not the process (how).
 - 4.1.4: Do not use process verbs such as "Convert", "Migrate", "Refactor", or "Reorganise".
 - 4.1.5: Use outcome verbs such as "Use", "Support", "Enable", "Fix", "Add", "Remove", or "Prevent".
+- 4.1.6: The title must describe the user-facing outcome or problem solved, not the implementation approach. Ask "What problem does this solve?" not "What did I change?"
 
 ## 4.2 Title Content
 

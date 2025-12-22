@@ -306,6 +306,7 @@ class ComplianceState:
     inner_client: ClaudeSDKClient | None = None
     cwd: Path | None = None
     current_user_prompt: str = ""
+    user_request_history: list[str] = field(default_factory=list)
     tool_call_history: list[str] = field(default_factory=list)
     last_failure_was_runtime: bool = False
 
@@ -478,6 +479,7 @@ class DeltaAgent(Agent):
         state: ComplianceState,
         action: str,
         user_prompt: str = "",
+        user_request_history: list[str] | None = None,
         lightweight: bool = False,
         progress_callback: Any = None,
     ) -> ComplianceReport:
@@ -486,7 +488,8 @@ class DeltaAgent(Agent):
         Args:
             state: Compliance state for the session.
             action: The proposed action to review.
-            user_prompt: The user's original request.
+            user_prompt: The user's current request.
+            user_request_history: All user requests in this session (for context).
             lightweight: Use lightweight review for read operations.
             progress_callback: Async callback(elapsed_seconds) to update progress UI.
         """
@@ -504,7 +507,11 @@ class DeltaAgent(Agent):
             logger.debug(f"Lightweight compliance prompt length: {len(prompt)} chars")
         else:
             prompt = build_compliance_prompt(
-                self.agents_doc, action, user_prompt, state.tool_call_history
+                self.agents_doc,
+                action,
+                user_prompt,
+                state.tool_call_history,
+                user_request_history,
             )
             logger.debug(f"Full compliance prompt length: {len(prompt)} chars")
 
@@ -645,6 +652,7 @@ class DeltaAgent(Agent):
                         state,
                         tool_description,
                         state.current_user_prompt,
+                        state.user_request_history,
                         lightweight=is_read_only,
                         progress_callback=update_progress,
                     )
@@ -1186,6 +1194,7 @@ class DeltaAgent(Agent):
         # Reset compliance attempt counter for new user prompts
         state.reset()
         state.current_user_prompt = prompt_text
+        state.user_request_history.append(prompt_text)
 
         # Check if prompt contains images
         has_images = any(block.get("type") == "image" for block in prompt_content)

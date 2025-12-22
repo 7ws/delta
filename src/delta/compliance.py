@@ -155,17 +155,29 @@ Evaluate whether the proposed action complies with AGENTS.md guidelines.
 
 IMPORTANT CONTEXT:
 - You are reviewing an AI agent's proposed action BEFORE it executes
-- The "User Request" is what the human asked the agent to do
+- The "Current User Request" is the most recent message from the human
+- The "Prior User Requests" show ALL previous messages from the human in this session
 - The "Previous Actions" show what tool calls have already been made in this session
 - You are NOT reviewing user feedback - only checking compliance with AGENTS.md
 - Do NOT assume the user has rejected or approved anything unless explicitly stated
 - Do NOT confuse previous compliance failures with user feedback
 
+CRITICAL - AUTHORIZATION FROM PRIOR REQUESTS:
+- If a user explicitly requested an action in ANY prior message, that request remains valid
+- Example: If the user said "create documentation" in message 1, and the agent is now
+  creating documentation in response to message 3, this is AUTHORIZED
+- Prior user requests carry forward as authorization for related actions
+- The agent should not need to re-ask permission for actions the user already requested
+
 ## AGENTS.md Content
 
 {agents_md_content}
 
-## User Request (from the human)
+## Prior User Requests (earlier messages in this session)
+
+{prior_user_requests}
+
+## Current User Request (most recent message from the human)
 
 {user_prompt}
 
@@ -281,14 +293,16 @@ def build_compliance_prompt(
     proposed_action: str,
     user_prompt: str = "",
     tool_history: list[str] | None = None,
+    user_request_history: list[str] | None = None,
 ) -> str:
     """Build the prompt for full compliance review.
 
     Args:
         agents_doc: Parsed AGENTS.md document.
         proposed_action: The action to evaluate.
-        user_prompt: The user's original request that triggered this action.
+        user_prompt: The user's current request that triggered this action.
         tool_history: List of previous tool calls in the session.
+        user_request_history: All user requests in this session (for authorization context).
 
     Returns:
         Formatted prompt for the compliance reviewer.
@@ -302,9 +316,20 @@ def build_compliance_prompt(
     else:
         history_text = "(No previous actions in this session)"
 
+    # Format user request history (prior requests that may authorize current action)
+    if user_request_history and len(user_request_history) > 1:
+        # Exclude current prompt (last item) since it is shown separately
+        prior_requests = user_request_history[:-1]
+        prior_requests_text = "\n\n".join(
+            f"[Message {i + 1}]\n{req}" for i, req in enumerate(prior_requests)
+        )
+    else:
+        prior_requests_text = "(No prior requests in this session)"
+
     return COMPLIANCE_REVIEW_PROMPT.format(
         agents_md_content=agents_doc.raw_content,
         user_prompt=user_prompt or "(No user prompt provided)",
+        prior_user_requests=prior_requests_text,
         tool_history=history_text,
         proposed_action=proposed_action,
         section_checklist=section_checklist,
