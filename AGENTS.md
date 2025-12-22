@@ -84,6 +84,8 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 2.2.5: Do not add error handling for scenarios that cannot happen. Trust internal code and framework guarantees.
 - 2.2.6: Do not create helpers, utilities, or abstractions for one-time operations.
 - 2.2.7: Do not design for hypothetical future requirements.
+- 2.2.8: Within the requested scope, be thorough. Complete all necessary changes without asking for permission to continue. If a change affects multiple files, update all affected files.
+- 2.2.9: Do not ask "Do you want me to..." for work that is clearly part of the requested task. Finish the job.
 
 ## 2.3 Warnings and Failures
 
