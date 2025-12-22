@@ -22,27 +22,91 @@ class LLMClient(Protocol):
         ...
 
 
+# =============================================================================
+# CRITICAL REQUIREMENT: GLOBAL FAILURE LIMIT
+# =============================================================================
+# Delta MUST escalate to the user after exactly 3 total compliance failures.
+# This limit is GLOBAL (never resets) and prevents infinite retry loops.
+#
+# The two valid outcomes after 3 failures are:
+#   1. Recover with an alternative approach (preferred)
+#   2. Abort and ask the user for clarification
+#
+# This requirement exists because:
+#   - LLM compliance reviewers can be inconsistent on subjective issues
+#   - Minor style issues (4.8/5, 4.9/5) can cause infinite loops
+#   - The agent needs a hard stop to prevent wasting user time
+#
+# DO NOT remove or increase this limit without explicit user approval.
+# =============================================================================
+GLOBAL_FAILURE_LIMIT = 3
+
+
 @dataclass
 class ComplianceState:
-    """Track compliance state across attempts."""
+    """Track compliance state across attempts.
+
+    CRITICAL: Two separate failure tracking mechanisms exist:
+
+    1. `current_attempt` / `max_attempts`: Per-action retry counter. Resets when
+       the agent tries a different approach. Allows recovery from transient issues.
+
+    2. `global_failure_count` / `GLOBAL_FAILURE_LIMIT`: Session-wide counter that
+       NEVER resets. After 3 total failures, the agent MUST stop and escalate to
+       the user. This prevents infinite loops from inconsistent compliance reviews.
+
+    The global limit is the ultimate safeguard. Even if the agent keeps trying
+    different approaches, after 3 total failures it must ask for user guidance.
+    """
 
     max_attempts: int = 2
     current_attempt: int = 0
+    global_failure_count: int = 0  # NEVER reset - escalate at GLOBAL_FAILURE_LIMIT
     blocked: bool = False
+    must_escalate: bool = False  # True when global limit reached
     previous_reports: list[ComplianceReport] = field(default_factory=list)
 
     def record_attempt(self, report: ComplianceReport) -> None:
-        """Record a compliance attempt."""
+        """Record a compliance attempt.
+
+        Tracks both per-action attempts and global failure count.
+        Global failures NEVER reset - they accumulate until user escalation.
+        """
+        if report.is_compliant:
+            return
+
+        # Non-compliant action - increment BOTH counters
         self.current_attempt += 1
+        self.global_failure_count += 1
         self.previous_reports.append(report)
-        if self.current_attempt >= self.max_attempts and not report.is_compliant:
+
+        # Check global limit FIRST - this is the ultimate safeguard
+        if self.global_failure_count >= GLOBAL_FAILURE_LIMIT:
+            self.must_escalate = True
+            self.blocked = True
+        elif self.current_attempt >= self.max_attempts:
             self.blocked = True
 
     def reset(self) -> None:
-        """Reset state for a new action."""
+        """Reset per-action compliance attempts for a new user prompt.
+
+        CRITICAL: This resets only per-action counters, NOT the global failure
+        count. The global counter (`global_failure_count`) persists across the
+        entire session and triggers user escalation at GLOBAL_FAILURE_LIMIT.
+
+        What resets:
+        - current_attempt: Per-action retry counter
+        - blocked: Per-action block flag
+        - previous_reports: Per-action failure history
+
+        What does NOT reset:
+        - global_failure_count: Session-wide failure counter (NEVER resets)
+        - must_escalate: Once true, stays true until user intervention
+        """
         self.current_attempt = 0
         self.blocked = False
         self.previous_reports.clear()
+        # CRITICAL: Do NOT reset global_failure_count or must_escalate
 
 
 @dataclass

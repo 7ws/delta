@@ -135,7 +135,7 @@ class AnthropicClient(LLMClient):
         """Lazy-load Anthropic client."""
         if self._client is None:
             try:
-                import anthropic  # type: ignore[import-not-found]
+                import anthropic
 
                 self._client = anthropic.Anthropic()
             except ImportError as e:

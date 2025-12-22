@@ -15,7 +15,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from acp import (
@@ -59,13 +59,20 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookContext,
+    HookJSONOutput,
     HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
+    PostToolUseHookInput,
+    PreCompactHookInput,
     PreToolUseHookInput,
+    StopHookInput,
+    SubagentStopHookInput,
     TextBlock,
+    ToolPermissionContext,
     ToolResultBlock,
     ToolUseBlock,
+    UserPromptSubmitHookInput,
 )
 
 from delta.compliance import (
@@ -248,22 +255,48 @@ def _read_resource_link(uri: str, cwd: Path | None = None) -> str | None:
         return None
 
 
+# =============================================================================
+# CRITICAL REQUIREMENT: GLOBAL FAILURE LIMIT
+# =============================================================================
+# Delta MUST escalate to the user after exactly 3 total compliance failures.
+# This limit is GLOBAL (never resets) and prevents infinite retry loops.
+#
+# The two valid outcomes after 3 failures are:
+#   1. Recover with an alternative approach (preferred)
+#   2. Abort and ask the user for clarification
+#
+# This requirement exists because:
+#   - LLM compliance reviewers can be inconsistent on subjective issues
+#   - Minor style issues (4.8/5, 4.9/5) can cause infinite loops
+#   - The agent needs a hard stop to prevent wasting user time
+#
+# DO NOT remove or increase this limit without explicit user approval.
+# =============================================================================
+GLOBAL_FAILURE_LIMIT = 3
+
+
 @dataclass
 class ComplianceState:
     """Track compliance state for a session.
 
-    Architecture: The agent gets `max_attempts` tries to propose a compliant action.
-    After exhausting attempts, Delta resets the counter and provides actionable
-    guidance. The agent should either fix the issue or ask the user for clarification
-    if the feedback is unclear.
+    CRITICAL: Two separate failure tracking mechanisms exist:
 
-    This design prevents infinite loops while allowing the agent to self-correct
-    when given clear feedback (e.g., "run pre-commit first").
+    1. `current_attempt` / `max_attempts`: Per-action retry counter. Resets when
+       the agent tries a different approach. Allows recovery from transient issues.
+
+    2. `global_failure_count` / `GLOBAL_FAILURE_LIMIT`: Session-wide counter that
+       NEVER resets. After 3 total failures, the agent MUST stop and escalate to
+       the user. This prevents infinite loops from inconsistent compliance reviews.
+
+    The global limit is the ultimate safeguard. Even if the agent keeps trying
+    different approaches, after 3 total failures it must ask for user guidance.
     """
 
-    max_attempts: int = 3
+    max_attempts: int = 2
     current_attempt: int = 0
+    global_failure_count: int = 0  # NEVER reset - escalate at GLOBAL_FAILURE_LIMIT
     blocked: bool = False
+    must_escalate: bool = False  # True when global limit reached
     previous_reports: list[ComplianceReport] = field(default_factory=list)
     agents_doc: AgentsDocument | None = None
     inner_client: ClaudeSDKClient | None = None
@@ -275,9 +308,8 @@ class ComplianceState:
     def record_attempt(self, report: ComplianceReport) -> None:
         """Record a compliance attempt.
 
-        Only compliance violations count toward the block threshold.
-        If the last failure was a runtime error and this attempt is compliant,
-        the agent successfully recovered - reset the attempt counter.
+        Tracks both per-action attempts and global failure count.
+        Global failures NEVER reset - they accumulate until user escalation.
         """
         if report.is_compliant:
             # Successful action - check if this is recovery from runtime error
@@ -287,12 +319,26 @@ class ComplianceState:
                 self.last_failure_was_runtime = False
             return
 
-        # Non-compliant action
+        # Non-compliant action - increment BOTH counters
         self.current_attempt += 1
+        self.global_failure_count += 1
         self.previous_reports.append(report)
         self.last_failure_was_runtime = False
 
-        if self.current_attempt >= self.max_attempts:
+        logger.info(
+            f"Compliance failure: attempt {self.current_attempt}/{self.max_attempts}, "
+            f"global {self.global_failure_count}/{GLOBAL_FAILURE_LIMIT}"
+        )
+
+        # Check global limit FIRST - this is the ultimate safeguard
+        if self.global_failure_count >= GLOBAL_FAILURE_LIMIT:
+            self.must_escalate = True
+            self.blocked = True
+            logger.warning(
+                f"Global failure limit reached ({GLOBAL_FAILURE_LIMIT}). "
+                "Agent must escalate to user."
+            )
+        elif self.current_attempt >= self.max_attempts:
             self.blocked = True
 
     def record_runtime_error(self, tool_description: str, error: str) -> None:
@@ -312,13 +358,28 @@ class ComplianceState:
         self.tool_call_history.append(f"[{status}] {tool_description}")
 
     def reset(self) -> None:
-        """Reset compliance attempts for a new user prompt (but keep history)."""
+        """Reset per-action compliance attempts for a new user prompt.
+
+        CRITICAL: This resets only per-action counters, NOT the global failure
+        count. The global counter (`global_failure_count`) persists across the
+        entire session and triggers user escalation at GLOBAL_FAILURE_LIMIT.
+
+        What resets:
+        - current_attempt: Per-action retry counter
+        - blocked: Per-action block flag
+        - previous_reports: Per-action failure history
+
+        What does NOT reset:
+        - global_failure_count: Session-wide failure counter (NEVER resets)
+        - must_escalate: Once true, stays true until user intervention
+        - tool_call_history: Persists for compliance reviewer context
+        """
         self.current_attempt = 0
         self.blocked = False
         self.previous_reports.clear()
         self.last_failure_was_runtime = False
-        # NOTE: We don't clear tool_call_history - it persists across prompts
-        # so the compliance reviewer knows what actions were taken earlier
+        # CRITICAL: Do NOT reset global_failure_count or must_escalate
+        # These persist until user provides guidance
 
 
 class DeltaAgent(Agent):
@@ -497,6 +558,10 @@ class DeltaAgent(Agent):
 
         return (
             "You MUST read and follow the guidelines in AGENTS.md for every response.\n\n"
+            "CRITICAL - PROACTIVE THOROUGHNESS (guideline 2.2.8-2.2.9):\n"
+            "When a change affects multiple files, update ALL affected files without "
+            "asking for permission. Do NOT stop after one file and ask 'Do you want me "
+            "to update the others?' - finish the job. Incomplete work is a violation.\n\n"
             f"AGENTS.md content:\n\n{self.agents_doc.raw_content}"
         )
 
@@ -507,7 +572,7 @@ class DeltaAgent(Agent):
             async def handle_tool_permission(
                 tool_name: str,
                 input_params: dict[str, Any],
-                context: dict[str, Any],
+                context: ToolPermissionContext,
             ) -> PermissionResultAllow | PermissionResultDeny:
                 """Review tool for compliance and request user permission.
 
@@ -613,29 +678,55 @@ class DeltaAgent(Agent):
                         await self._conn.session_update(session_id=session_id, update=chunk)
 
                         # After max_attempts failures, guide the agent to fix or escalate
-                        # Architecture: 2 attempts to comply, then either guide (actionable)
-                        # or ask for clarification (ambiguous)
+                        # Check if global failure limit reached - MUST escalate to user
+                        # This is the ultimate safeguard against infinite loops
+                        if state.must_escalate:
+                            logger.warning(
+                                f"Global failure limit ({GLOBAL_FAILURE_LIMIT}) reached. "
+                                "Interrupting agent to escalate to user."
+                            )
+                            return PermissionResultDeny(
+                                message=(
+                                    f"COMPLIANCE BLOCKED: {GLOBAL_FAILURE_LIMIT} total "
+                                    f"failures reached.\n\n"
+                                    f"Latest failure:\n{failing_text}\n\n"
+                                    "You have exhausted all compliance retry attempts. "
+                                    "You MUST now choose one of these options:\n"
+                                    "1. Try a completely different approach to achieve "
+                                    "the user's goal\n"
+                                    "2. Ask the user for clarification on how to proceed\n\n"
+                                    "Do NOT retry the same type of action. The compliance "
+                                    "reviewer has blocked this approach."
+                                ),
+                                interrupt=True,
+                            )
+
+                        # Per-action limit reached but global limit not yet hit
+                        # Reset per-action counter and allow retry with guidance
                         if state.blocked:
-                            # Reset for another round - the feedback is actionable
                             state.blocked = False
                             state.current_attempt = 0
 
                             return PermissionResultDeny(
                                 message=(
-                                    f"Compliance review failed after {self.max_attempts} "
-                                    f"attempts:\n{failing_text}\n\n"
-                                    "The compliance feedback above is actionable. "
-                                    "Address these issues before retrying this action. "
-                                    "If you cannot determine how to proceed, ask the user "
-                                    "for clarification."
+                                    f"Compliance review failed (attempt "
+                                    f"{state.global_failure_count}/{GLOBAL_FAILURE_LIMIT} "
+                                    f"global):\n{failing_text}\n\n"
+                                    "You MUST improve your approach based on the feedback. "
+                                    "Do NOT retry the same action unchanged. "
+                                    f"After {GLOBAL_FAILURE_LIMIT} total failures, you "
+                                    "will be required to escalate to the user."
                                 ),
                                 interrupt=False,
                             )
 
                         return PermissionResultDeny(
                             message=(
-                                f"Action failed compliance review:\n{failing_text}\n\n"
-                                "Review the guidelines and try a compliant approach."
+                                f"Action failed compliance review "
+                                f"({state.global_failure_count}/{GLOBAL_FAILURE_LIMIT} "
+                                f"global):\n{failing_text}\n\n"
+                                "You MUST improve your approach based on the feedback. "
+                                "Do NOT retry the same action unchanged."
                             ),
                             interrupt=False,
                         )
@@ -661,9 +752,16 @@ class DeltaAgent(Agent):
                 tool_call_id = f"tool_{uuid4().hex[:8]}"
 
                 # Build rich content for file operations
-                tool_content = None
-                tool_locations = None
-                tool_kind = None
+                tool_content: list[Any] | None = None
+                tool_locations: list[ToolCallLocation] | None = None
+                tool_kind: (
+                    Literal[
+                        "read", "edit", "delete", "move",
+                        "search", "execute", "think", "fetch",
+                        "switch_mode", "other",
+                    ]
+                    | None
+                ) = None
                 tool_title = tool_description  # Use human-readable description
 
                 if tool_name in ("Write", "mcp__acp__Write"):
@@ -824,10 +922,17 @@ class DeltaAgent(Agent):
                 )
 
             async def track_tool_call(
-                hook_input: PreToolUseHookInput,
+                hook_input: (
+                    PreToolUseHookInput
+                    | PostToolUseHookInput
+                    | UserPromptSubmitHookInput
+                    | StopHookInput
+                    | SubagentStopHookInput
+                    | PreCompactHookInput
+                ),
                 tool_use_id: str | None,
                 context: HookContext,
-            ) -> dict[str, Any]:
+            ) -> HookJSONOutput:
                 """Track all tool calls for compliance review context.
 
                 This hook fires for ALL tools (Read, Glob, Grep, etc.) before
@@ -836,8 +941,14 @@ class DeltaAgent(Agent):
 
                 Returns empty dict to allow the tool call to proceed.
                 """
-                tool_name = hook_input["tool_name"]
-                tool_input = hook_input["tool_input"]
+                # Only process PreToolUse hooks - others lack tool_name/tool_input
+                if "tool_name" not in hook_input:
+                    return {}
+
+                # Cast to PreToolUseHookInput after runtime check above
+                pre_tool_input: PreToolUseHookInput = hook_input  # type: ignore[assignment]
+                tool_name = pre_tool_input["tool_name"]
+                tool_input = pre_tool_input["tool_input"]
                 tool_description = self._format_tool_action(tool_name, tool_input)
 
                 # Record in history (allowed=True since this hook doesn't block)
@@ -933,11 +1044,13 @@ class DeltaAgent(Agent):
 
                     elif isinstance(block, ToolResultBlock):
                         # Update tool call status based on result
-                        tool_call_id = tool_calls.get(block.tool_use_id)
-                        if tool_call_id:
-                            status = "failed" if block.is_error else "completed"
+                        result_tool_call_id = tool_calls.get(block.tool_use_id)
+                        if result_tool_call_id:
+                            status: Literal["failed", "completed"] = (
+                                "failed" if block.is_error else "completed"
+                            )
                             tool_update = update_tool_call(
-                                tool_call_id=tool_call_id,
+                                tool_call_id=result_tool_call_id,
                                 status=status,
                             )
                             await self._conn.session_update(
