@@ -65,8 +65,7 @@ uv run delta serve --help
 
 - `--agents-md PATH`: Path to AGENTS.md (auto-detected by default)
 - `--max-attempts N`: Maximum compliance attempts before blocking (default: 2)
-- `--provider NAME`: LLM provider for compliance review (claude-code, openai, anthropic, ollama)
-- `--model NAME`: Model to use for compliance review
+- `--model NAME`: Claude Code model to use (e.g., 'haiku', 'sonnet')
 
 ### Custom AGENTS.md Location
 

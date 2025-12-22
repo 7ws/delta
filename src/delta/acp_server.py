@@ -88,7 +88,7 @@ from delta.guidelines import (
     get_bundled_agents_md,
     parse_agents_md,
 )
-from delta.llm import LLMClient, classify_action_type, get_fast_client, get_llm_client
+from delta.llm import ClaudeCodeClient, classify_action_type, get_fast_client, get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -166,14 +166,18 @@ def _extract_prompt_content(
                 text_parts.append(block.get("text", ""))
             elif block_type == "image":
                 flush_text()
-                content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": block.get("mimeType", block.get("mime_type", "image/png")),
-                        "data": block.get("data", ""),
-                    },
-                })
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": block.get(
+                                "mimeType", block.get("mime_type", "image/png")
+                            ),
+                            "data": block.get("data", ""),
+                        },
+                    }
+                )
             elif block_type == "resource":
                 resource = block.get("resource", {})
                 uri = resource.get("uri", "")
@@ -185,21 +189,21 @@ def _extract_prompt_content(
                 name = block.get("name", uri)
                 file_content = _read_resource_link(uri, cwd)
                 if file_content:
-                    text_parts.append(
-                        f'<file uri="{uri}" name="{name}">\n{file_content}\n</file>'
-                    )
+                    text_parts.append(f'<file uri="{uri}" name="{name}">\n{file_content}\n</file>')
                 else:
                     text_parts.append(f"[Referenced file: {name} ({uri})]")
         elif isinstance(block, ImageContentBlock):
             flush_text()
-            content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": block.mime_type,
-                    "data": block.data,
-                },
-            })
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": block.mime_type,
+                        "data": block.data,
+                    },
+                }
+            )
         elif isinstance(block, TextContentBlock):
             text_parts.append(block.text)
         elif isinstance(block, EmbeddedResourceContentBlock):
@@ -391,16 +395,12 @@ class DeltaAgent(Agent):
         self,
         agents_md_path: Path | None = None,
         max_attempts: int = 2,
-        llm_provider: str | None = None,
         llm_model: str | None = None,
     ) -> None:
         """Initialize Delta agent."""
         self.max_attempts = max_attempts
         self.sessions: dict[str, ComplianceState] = {}
-        self.llm_client: LLMClient = get_llm_client(
-            provider=llm_provider,
-            model=llm_model,
-        )
+        self.llm_client: ClaudeCodeClient = get_llm_client(model=llm_model)
 
         self._explicit_agents_md_path = agents_md_path
         self.agents_md_path: Path | None = None
@@ -598,8 +598,10 @@ class DeltaAgent(Agent):
                 # Determine if this is a read-only operation (lightweight review)
                 # Known read-only tools get instant classification
                 known_read_only_tools = {
-                    "Read", "mcp__acp__Read",
-                    "Glob", "Grep",
+                    "Read",
+                    "mcp__acp__Read",
+                    "Glob",
+                    "Grep",
                     "Task",  # Task spawns subagents for exploration
                 }
                 if tool_name in known_read_only_tools:
@@ -756,9 +758,16 @@ class DeltaAgent(Agent):
                 tool_locations: list[ToolCallLocation] | None = None
                 tool_kind: (
                     Literal[
-                        "read", "edit", "delete", "move",
-                        "search", "execute", "think", "fetch",
-                        "switch_mode", "other",
+                        "read",
+                        "edit",
+                        "delete",
+                        "move",
+                        "search",
+                        "execute",
+                        "think",
+                        "fetch",
+                        "switch_mode",
+                        "other",
                     ]
                     | None
                 ) = None
@@ -875,9 +884,7 @@ class DeltaAgent(Agent):
                             tool_call_id=tool_call_id,
                             status="in_progress",
                         )
-                        await self._conn.session_update(
-                            session_id=session_id, update=tool_progress
-                        )
+                        await self._conn.session_update(session_id=session_id, update=tool_progress)
                         # Record allowed tool call in history for future compliance reviews
                         state.record_tool_call(tool_description, allowed=True)
                         return PermissionResultAllow(updated_input=input_params)
@@ -890,9 +897,7 @@ class DeltaAgent(Agent):
                         tool_call_id=tool_call_id,
                         status="failed",
                     )
-                    await self._conn.session_update(
-                        session_id=session_id, update=tool_progress
-                    )
+                    await self._conn.session_update(session_id=session_id, update=tool_progress)
                     state.record_tool_call(tool_description, allowed=False)
                     return PermissionResultDeny(
                         message=(
@@ -909,9 +914,7 @@ class DeltaAgent(Agent):
                     tool_call_id=tool_call_id,
                     status="failed",
                 )
-                await self._conn.session_update(
-                    session_id=session_id, update=tool_progress
-                )
+                await self._conn.session_update(session_id=session_id, update=tool_progress)
                 state.record_tool_call(tool_description, allowed=False)
                 return PermissionResultDeny(
                     message=(
@@ -1230,7 +1233,6 @@ class DeltaAgent(Agent):
 async def run_server(
     agents_md_path: Path | None = None,
     max_attempts: int = 2,
-    llm_provider: str | None = None,
     llm_model: str | None = None,
 ) -> None:
     """Run the Delta ACP server."""
@@ -1239,7 +1241,6 @@ async def run_server(
     agent = DeltaAgent(
         agents_md_path=agents_md_path,
         max_attempts=max_attempts,
-        llm_provider=llm_provider,
         llm_model=llm_model,
     )
 

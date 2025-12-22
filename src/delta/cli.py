@@ -33,13 +33,8 @@ def main() -> int:
         help="Maximum compliance attempts before blocking (default: 2)",
     )
     serve_parser.add_argument(
-        "--provider",
-        choices=["claude-code", "openai", "anthropic", "ollama"],
-        help="LLM provider for compliance review (default: claude-code)",
-    )
-    serve_parser.add_argument(
         "--model",
-        help="Model to use (provider-specific)",
+        help="Claude Code model to use (e.g., 'haiku', 'sonnet')",
     )
     serve_parser.add_argument(
         "-v",
@@ -113,7 +108,6 @@ def _run_serve(args: argparse.Namespace) -> int:
             run_server(
                 agents_md_path=args.agents_md,
                 max_attempts=args.max_attempts,
-                llm_provider=args.provider,
                 llm_model=args.model,
             )
         )
