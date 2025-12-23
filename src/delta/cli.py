@@ -27,14 +27,13 @@ def main() -> int:
         help="Path to AGENTS.md (auto-detected if not specified)",
     )
     serve_parser.add_argument(
-        "--max-attempts",
-        type=int,
-        default=2,
-        help="Maximum compliance attempts before blocking (default: 2)",
+        "--review-model",
+        help="Model for compliance reviews (e.g., 'sonnet', 'opus')",
     )
     serve_parser.add_argument(
-        "--model",
-        help="Claude Code model to use (e.g., 'haiku', 'sonnet')",
+        "--classify-model",
+        default="haiku",
+        help="Model for action classification (default: 'haiku')",
     )
     serve_parser.add_argument(
         "-v",
@@ -107,8 +106,8 @@ def _run_serve(args: argparse.Namespace) -> int:
         asyncio.run(
             run_server(
                 agents_md_path=args.agents_md,
-                max_attempts=args.max_attempts,
-                llm_model=args.model,
+                review_model=args.review_model,
+                classify_model=args.classify_model,
             )
         )
         return 0

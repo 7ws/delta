@@ -1,46 +1,86 @@
 # Delta
 
-AI agent compliance wrapper that enforces AGENTS.md guidelines.
+Compliance enforcement layer for AI coding agents.
 
-Delta wraps existing AI agents with a quality gate that reviews every proposed action for compliance with AGENTS.md before execution. Non-compliant actions are rejected, forcing the agent to propose alternatives.
+Delta wraps an AI coding agent and enforces your AGENTS.md guidelines through autonomous review. Work is reviewed when ready, not at every action, enabling atomic changes that span multiple files.
 
-## Problem
+## The Problem
 
-AI agents suffer from context drift over time. They forget guidelines documented in AGENTS.md and produce unintended results. Manual review catches violations, but this should not be necessary.
+AI coding agents drift from your standards over long sessions. They forget commit message conventions, ignore code style rules, and skip documentation requirements. Blocking every action creates false positives when the agent is building toward a compliant result (for example, implementation and tests in the same commit).
 
-## Solution
+## The Solution
 
-Delta implements a compliance protocol between you and an inner AI agent.
+Delta enforces your guidelines through autonomous review at natural checkpoints.
 
-## How It Works
+```
+User
+  │
+  ▼
+Inner Agent ──────────────────────────────────┐
+  │                                           │
+  │  ┌──────────────────────────────────────┐ │
+  │  │          Compliance Gate             │ │
+  │  │                                      │ │
+  │  │  Tool call ──▶ Review ──▶ AGENTS.md  │ │
+  │  │                  │                   │ │
+  │  │          ┌───────┴───────┐           │ │
+  │  │          ▼               ▼           │ │
+  │  │       Reject          Approve        │ │
+  │  │          │               │           │ │
+  │  │          ▼               ▼           │ │
+  │  │   Retry with        Execute tool     │ │
+  │  │   feedback               │           │ │
+  │  │                          │           │ │
+  │  └──────────────────────────│───────────┘ │
+  │                             │             │
+  ◀─────────────────────────────┘             │
+  │                                           │
+  ▼                                           │
+Response to user ◀────────────────────────────┘
 
-1. **User makes a request** to Delta (the outer agent)
-2. **Delta hands the request to the inner agent** with AGENTS.md included in the system prompt
-3. **Inner agent responds** attempting to comply with AGENTS.md
-4. **Delta performs compliance review** by scoring the response against each major section in AGENTS.md
-5. **If compliant** (all sections score 5/5): response is forwarded to the user
-6. **If not compliant**: Delta tells the inner agent which sections failed and requests a revision
-7. **If still failing after max attempts**: Delta blocks and requests user clarification
+After 3 failed plan reviews: escalate to user for guidance.
+```
 
-A slow correct result is better than a fast incorrect one.
+### Workflow
+
+1. **Plan**: The inner agent receives the user prompt and guidelines, then creates a plan.
+2. **Plan review**: The compliance reviewer validates the plan against all guideline sections. The inner agent revises until every section scores 5/5 (up to 3 attempts). After 3 failures, Delta escalates to the user.
+3. **Implement**: The inner agent executes the approved plan. Tool calls proceed with user permission.
+4. **Review check**: After each action, Haiku evaluates whether work is ready for review.
+5. **Compliance review**: When ready, Sonnet scores the accumulated work against all applicable guidelines. The inner agent revises until every section scores 5/5 (unlimited attempts during execution).
+6. **Complete**: Work is complete when the reviewer approves all sections.
+
+### Scoring
+
+Each guideline section is scored independently:
+- Every applicable guideline within a section must score 5/5
+- The section score is the average of its guideline scores
+- Work passes only when all sections achieve 5/5 average
+
+### Why This Architecture
+
+- **Atomic changes**: File edits are not blocked individually. The review evaluates the complete change set.
+- **Natural checkpoints**: Reviews occur when the inner agent signals readiness, not at arbitrary points.
+- **Guided revision**: The inner agent receives specific feedback and retries, rather than generic rejections.
+- **Escalation path**: Plan review escalates after 3 failures. Execution review allows unlimited revision.
 
 ## Installation
 
 ```bash
-uv add delta-compliance
+uv add delta-ai
 ```
 
 ## Usage
 
-Run as ACP server:
+Start the ACP server:
 
 ```bash
-uv run delta serve
+delta serve
 ```
 
-### Zed Editor Integration
+### Editor Integration
 
-Add to your Zed `settings.json`:
+**Zed**: Add to `settings.json`:
 
 ```json
 {
@@ -55,68 +95,52 @@ Add to your Zed `settings.json`:
 }
 ```
 
-Select "Delta" as your agent in the Agent Panel.
+Select "Delta" in the Agent Panel.
 
 ### Options
 
 ```bash
-uv run delta serve --help
+delta serve --help
 ```
 
-- `--agents-md PATH`: Path to AGENTS.md (auto-detected by default)
-- `--max-attempts N`: Maximum compliance attempts before blocking (default: 2)
-- `--model NAME`: Claude Code model to use (e.g., 'haiku', 'sonnet')
+| Option | Description |
+|--------|-------------|
+| `--agents-md PATH` | Path to AGENTS.md (auto-detected by default) |
+| `--model NAME` | Model for compliance reviews |
 
-### Custom AGENTS.md Location
+### AGENTS.md Discovery
 
-Delta auto-detects AGENTS.md by searching upward from the current directory. To specify a path:
+Delta searches for AGENTS.md upward from the working directory. If none exists in your project, Delta uses its bundled guidelines as a fallback.
 
-```bash
-uv run delta serve --agents-md /path/to/AGENTS.md
-```
-
-## Compliance Report Format
-
-Every proposed action generates a compliance report:
-
-```
-Proposed action: Write unit tests for authentication module
-- §1 Writing Style: 5.0/5 (All guidelines satisfied)
-- §2 Technical Conduct: 5.0/5 (All guidelines satisfied)
-- §3 Git Operations: N/A (No git operations in this action)
-- §4 Commit Messages: N/A (No commit in this action)
-...
-```
-
-## AGENTS.md Structure
-
-Delta expects AGENTS.md to follow this structure:
+## AGENTS.md Format
 
 ```markdown
-# 1. Major Section Name
+# 1. Section Name
 
-## 1.1 Minor Section Name
+## 1.1 Subsection Name
 
 - 1.1.1: Guideline text.
 - 1.1.2: Another guideline.
 
-## 1.2 Another Minor Section
+# 2. Another Section
 
-- 1.2.1: Guideline text.
-
-# 2. Another Major Section
-
-- 2.1: Guideline without minor section.
+- 2.1: Guideline without subsection.
 ```
 
-## Scoring Scale
+Delta parses numbered sections and guidelines. The reviewer scores work against every applicable guideline.
 
-- **5/5**: Fully complies with the guideline
-- **4/5**: Mostly complies, with minor issues
-- **3/5**: Partially complies, with significant issues
-- **2/5**: Barely complies, with major issues
-- **1/5**: Does not comply at all
-- **N/A**: Not applicable to the proposed action
+## Compliance Scoring
+
+| Score | Meaning |
+|-------|---------|
+| 5/5 | Fully complies |
+| 4/5 | Minor issues |
+| 3/5 | Significant issues |
+| 2/5 | Major issues |
+| 1/5 | Does not comply |
+| N/A | Not applicable |
+
+Work passes review only when all applicable guidelines score 5/5.
 
 ## License
 

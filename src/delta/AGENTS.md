@@ -128,9 +128,11 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 2.8.2: When modifying code, update related documentation and tests in the same commit. Do not leave them out of sync.
 - 2.8.3: When existing tests fail after code changes, determine whether the test or the code is wrong. Tests may reveal unintended breaking changes.
 - 2.8.4: When implementing new features, write tests first when the expected behaviour is clear. Tests validate that the implementation meets requirements.
-- 2.8.5: When documentation does not exist for a significant feature or module, offer to create it. Phrase the offer concisely: "This module lacks documentation. Create it?"
-- 2.8.6: Do not create documentation unsolicited. Offer first; create only after user approval.
-- 2.8.7: Prioritise updating existing documentation over creating new files. Consolidate related information.
+- 2.8.5: Before implementing, search for existing documentation in the codebase. If documentation exists for the affected area, updating it is mandatory.
+- 2.8.6: When a feature changes user-visible behaviour, documentation MUST be updated. "The documentation does not mention this feature" means the documentation is incomplete and must be fixed, not that documentation updates can be skipped.
+- 2.8.7: New features require documentation when related documentation exists. Add use cases, update guides, and document new functionality in the same commit as the implementation.
+- 2.8.8: Do not create documentation outside the scope of a feature or fix. Documentation supports code.
+- 2.8.9: Prioritise updating existing documentation over creating new files. Consolidate related information.
 
 
 ---
@@ -394,7 +396,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 8.3 Project Documentation
 
-- 8.3.1: Add or update project documentation when making changes. Store documentation in the location that each project specifies.
+- 8.3.1: Create, update, or delete project documentation when code changes affect it. Store documentation in the location that the project specifies.
 - 8.3.2: Do not create documentation that duplicates information in code. Models, URLs, and schemas are already documented by the code itself.
 - 8.3.3: Do not create index files or tables of contents that require manual synchronisation.
 - 8.3.4: Prefer one file per concept over monolithic files. Smaller files reduce merge conflicts and are easier to maintain.

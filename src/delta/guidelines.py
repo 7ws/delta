@@ -47,10 +47,22 @@ class AgentsDocument:
 
     raw_content: str
     major_sections: list[MajorSection] = field(default_factory=list)
+    _section_contents: dict[int, str] = field(default_factory=dict)
 
     def get_section_names(self) -> list[str]:
         """Return list of major section names with numbers."""
         return [f"§{s.number} {s.name}" for s in self.major_sections]
+
+    def get_section_content(self, section_number: int) -> str:
+        """Return the raw content of a major section.
+
+        Args:
+            section_number: The section number to retrieve.
+
+        Returns:
+            Raw content of the section, or empty string if not found.
+        """
+        return self._section_contents.get(section_number, "")
 
 
 def parse_agents_md(path: Path) -> AgentsDocument:
@@ -72,11 +84,16 @@ def parse_agents_md(path: Path) -> AgentsDocument:
     major_matches = list(major_pattern.finditer(content))
 
     for i, match in enumerate(major_matches):
-        section_start = match.end()
+        section_start = match.start()  # Include the header
         section_end = major_matches[i + 1].start() if i + 1 < len(major_matches) else len(content)
-        section_content = content[section_start:section_end]
+        full_section_content = content[section_start:section_end]
+        section_content = content[match.end():section_end]  # Content after header
 
-        major = MajorSection(number=int(match.group(1)), name=match.group(2))
+        section_number = int(match.group(1))
+        major = MajorSection(number=section_number, name=match.group(2))
+
+        # Store raw section content for parallel compliance reviews
+        doc._section_contents[section_number] = full_section_content.strip()
 
         minor_matches = list(minor_pattern.finditer(section_content))
 

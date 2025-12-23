@@ -9,11 +9,10 @@ Architecture: Editor <-> Delta (ACP) <-> Inner Agent (Claude Agent SDK)
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -22,11 +21,13 @@ from acp import (
     InitializeResponse,
     NewSessionResponse,
     PromptResponse,
+    plan_entry,
     run_agent,
     start_tool_call,
     text_block,
     tool_diff_content,
     update_agent_message,
+    update_plan,
     update_tool_call,
 )
 from acp.interfaces import Agent, Client
@@ -70,17 +71,15 @@ from claude_agent_sdk import (
     SubagentStopHookInput,
     TextBlock,
     ToolPermissionContext,
-    ToolResultBlock,
     ToolUseBlock,
     UserPromptSubmitHookInput,
 )
 
 from delta.compliance import (
     ComplianceReport,
-    build_compliance_prompt,
-    build_lightweight_prompt,
+    build_batch_work_review_prompt,
+    build_plan_review_prompt,
     parse_compliance_response,
-    parse_lightweight_response,
 )
 from delta.guidelines import (
     AgentsDocument,
@@ -88,7 +87,19 @@ from delta.guidelines import (
     get_bundled_agents_md,
     parse_agents_md,
 )
-from delta.llm import ClaudeCodeClient, classify_action_type, get_fast_client, get_llm_client
+from delta.llm import (
+    ClaudeCodeClient,
+    InvalidPlanParseResponse,
+    InvalidReviewReadinessResponse,
+    InvalidTriageResponse,
+    detect_task_progress,
+    generate_clarifying_questions,
+    get_classify_client,
+    get_llm_client,
+    is_ready_for_review,
+    parse_plan_tasks,
+    triage_user_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -259,132 +270,69 @@ def _read_resource_link(uri: str, cwd: Path | None = None) -> str | None:
         return None
 
 
-# =============================================================================
-# CRITICAL REQUIREMENT: GLOBAL FAILURE LIMIT
-# =============================================================================
-# Delta MUST escalate to the user after exactly 3 total compliance failures.
-# This limit is GLOBAL (never resets) and prevents infinite retry loops.
-#
-# The two valid outcomes after 3 failures are:
-#   1. Recover with an alternative approach (preferred)
-#   2. Abort and ask the user for clarification
-#
-# This requirement exists because:
-#   - LLM compliance reviewers can be inconsistent on subjective issues
-#   - Minor style issues (4.8/5, 4.9/5) can cause infinite loops
-#   - The agent needs a hard stop to prevent wasting user time
-#
-# DO NOT remove or increase this limit without explicit user approval.
-# =============================================================================
-GLOBAL_FAILURE_LIMIT = 3
+class WorkflowPhase(Enum):
+    """Current phase of the workflow."""
+
+    PLANNING = "planning"
+    EXECUTING = "executing"
+    REVIEWING = "reviewing"
+    COMPLETE = "complete"
+
+
+@dataclass
+class PlanTask:
+    """A single task from the approved plan."""
+
+    content: str
+    status: Literal["pending", "in_progress", "completed"] = "pending"
 
 
 @dataclass
 class ComplianceState:
     """Track compliance state for a session.
 
-    CRITICAL: Two separate failure tracking mechanisms exist:
+    Workflow phases:
+    1. PLANNING: Inner agent creates a plan, reviewed up to 3 times
+    2. EXECUTING: Inner agent implements the plan, tools proceed with user permission
+    3. REVIEWING: Haiku detected readiness, Sonnet reviews the batch
+    4. COMPLETE: All sections scored 5/5
 
-    1. `current_attempt` / `max_attempts`: Per-action retry counter. Resets when
-       the agent tries a different approach. Allows recovery from transient issues.
-
-    2. `global_failure_count` / `GLOBAL_FAILURE_LIMIT`: Session-wide counter that
-       NEVER resets. After 3 total failures, the agent MUST stop and escalate to
-       the user. This prevents infinite loops from inconsistent compliance reviews.
-
-    The global limit is the ultimate safeguard. Even if the agent keeps trying
-    different approaches, after 3 total failures it must ask for user guidance.
+    Plan review has a hard limit of 3 attempts before escalation.
+    Execution review has unlimited attempts (the agent keeps revising).
     """
 
-    max_attempts: int = 2
-    current_attempt: int = 0
-    global_failure_count: int = 0  # NEVER reset - escalate at GLOBAL_FAILURE_LIMIT
-    blocked: bool = False
-    must_escalate: bool = False  # True when global limit reached
-    previous_reports: list[ComplianceReport] = field(default_factory=list)
+    # Workflow state
+    phase: WorkflowPhase = WorkflowPhase.PLANNING
+    approved_plan: str = ""
+    work_summary: str = ""
+    plan_review_attempts: int = 0
+    max_plan_attempts: int = 5
+    plan_tasks: list[PlanTask] = field(default_factory=list)
+
+    # Session state
     agents_doc: AgentsDocument | None = None
     inner_client: ClaudeSDKClient | None = None
     cwd: Path | None = None
     current_user_prompt: str = ""
     user_request_history: list[str] = field(default_factory=list)
     tool_call_history: list[str] = field(default_factory=list)
-    last_failure_was_runtime: bool = False
-
-    def record_attempt(self, report: ComplianceReport) -> None:
-        """Record a compliance attempt.
-
-        Tracks both per-action attempts and global failure count.
-        Global failures NEVER reset - they accumulate until user escalation.
-        """
-        if report.is_compliant:
-            # Successful action - check if this is recovery from runtime error
-            if self.last_failure_was_runtime:
-                logger.info("Agent recovered from runtime error with compliant action")
-                self.current_attempt = 0
-                self.last_failure_was_runtime = False
-            return
-
-        # Non-compliant action - increment BOTH counters
-        self.current_attempt += 1
-        self.global_failure_count += 1
-        self.previous_reports.append(report)
-        self.last_failure_was_runtime = False
-
-        logger.info(
-            f"Compliance failure: attempt {self.current_attempt}/{self.max_attempts}, "
-            f"global {self.global_failure_count}/{GLOBAL_FAILURE_LIMIT}"
-        )
-
-        # Check global limit FIRST - this is the ultimate safeguard
-        if self.global_failure_count >= GLOBAL_FAILURE_LIMIT:
-            self.must_escalate = True
-            self.blocked = True
-            logger.warning(
-                f"Global failure limit reached ({GLOBAL_FAILURE_LIMIT}). "
-                "Agent must escalate to user."
-            )
-        elif self.current_attempt >= self.max_attempts:
-            self.blocked = True
-
-    def record_runtime_error(self, tool_description: str, error: str) -> None:
-        """Record a runtime error (not a compliance violation).
-
-        Runtime errors (interactive mode unavailable, file not found, etc.)
-        do not count toward the block threshold. They signal that the agent
-        should try a different approach.
-        """
-        self.last_failure_was_runtime = True
-        self.tool_call_history.append(f"[RUNTIME_ERROR] {tool_description}: {error}")
-        logger.info(f"Runtime error recorded (not counting toward block): {error}")
 
     def record_tool_call(self, tool_description: str, allowed: bool) -> None:
         """Record a tool call in the session history."""
         status = "ALLOWED" if allowed else "DENIED"
         self.tool_call_history.append(f"[{status}] {tool_description}")
 
-    def reset(self) -> None:
-        """Reset per-action compliance attempts for a new user prompt.
+    def reset_for_new_prompt(self) -> None:
+        """Reset state for a new user prompt.
 
-        CRITICAL: This resets only per-action counters, NOT the global failure
-        count. The global counter (`global_failure_count`) persists across the
-        entire session and triggers user escalation at GLOBAL_FAILURE_LIMIT.
-
-        What resets:
-        - current_attempt: Per-action retry counter
-        - blocked: Per-action block flag
-        - previous_reports: Per-action failure history
-
-        What does NOT reset:
-        - global_failure_count: Session-wide failure counter (NEVER resets)
-        - must_escalate: Once true, stays true until user intervention
-        - tool_call_history: Persists for compliance reviewer context
+        Resets workflow state while preserving tool call history
+        for compliance reviewer context.
         """
-        self.current_attempt = 0
-        self.blocked = False
-        self.previous_reports.clear()
-        self.last_failure_was_runtime = False
-        # CRITICAL: Do NOT reset global_failure_count or must_escalate
-        # These persist until user provides guidance
+        self.phase = WorkflowPhase.PLANNING
+        self.approved_plan = ""
+        self.work_summary = ""
+        self.plan_review_attempts = 0
+        self.plan_tasks = []
 
 
 class DeltaAgent(Agent):
@@ -395,13 +343,13 @@ class DeltaAgent(Agent):
     def __init__(
         self,
         agents_md_path: Path | None = None,
-        max_attempts: int = 2,
-        llm_model: str | None = None,
+        review_model: str | None = None,
+        classify_model: str = "haiku",
     ) -> None:
         """Initialize Delta agent."""
-        self.max_attempts = max_attempts
         self.sessions: dict[str, ComplianceState] = {}
-        self.llm_client: ClaudeCodeClient = get_llm_client(model=llm_model)
+        self.llm_client: ClaudeCodeClient = get_llm_client(model=review_model)
+        self.classify_model = classify_model
 
         self._explicit_agents_md_path = agents_md_path
         self.agents_md_path: Path | None = None
@@ -414,7 +362,7 @@ class DeltaAgent(Agent):
     def _get_state(self, session_id: str) -> ComplianceState:
         """Get or create compliance state for session."""
         if session_id not in self.sessions:
-            self.sessions[session_id] = ComplianceState(max_attempts=self.max_attempts)
+            self.sessions[session_id] = ComplianceState()
         return self.sessions[session_id]
 
     def _format_tool_action(self, tool_name: str, input_params: dict[str, Any]) -> str:
@@ -474,87 +422,260 @@ class DeltaAgent(Agent):
                     )
         self.agents_doc = parse_agents_md(self.agents_md_path)
 
-    async def _perform_compliance_review(
+    async def _review_plan(
         self,
         state: ComplianceState,
-        action: str,
-        user_prompt: str = "",
-        user_request_history: list[str] | None = None,
-        lightweight: bool = False,
-        progress_callback: Any = None,
+        plan: str,
+        session_id: str,
     ) -> ComplianceReport:
-        """Perform compliance review on a proposed action.
+        """Review a plan for compliance before execution.
 
         Args:
             state: Compliance state for the session.
-            action: The proposed action to review.
-            user_prompt: The user's current request.
-            user_request_history: All user requests in this session (for context).
-            lightweight: Use lightweight review for read operations.
-            progress_callback: Async callback(elapsed_seconds) to update progress UI.
-        """
-        start_time = time.monotonic()
+            plan: The proposed implementation plan.
+            session_id: ACP session identifier.
 
+        Returns:
+            ComplianceReport with scores and revision guidance.
+        """
         self._load_agents_md()
 
         if self.agents_doc is None:
             raise RuntimeError("Failed to load AGENTS.md")
 
-        review_type = "quick" if lightweight else "full"
+        prompt = build_plan_review_prompt(
+            self.agents_doc,
+            state.current_user_prompt,
+            plan,
+        )
 
-        if lightweight:
-            prompt = build_lightweight_prompt(self.agents_doc, action)
-            logger.debug(f"Lightweight compliance prompt length: {len(prompt)} chars")
-        else:
-            prompt = build_compliance_prompt(
-                self.agents_doc,
-                action,
-                user_prompt,
-                state.tool_call_history,
-                user_request_history,
-            )
-            logger.debug(f"Full compliance prompt length: {len(prompt)} chars")
+        # Retry up to 3 times on JSON parse failures
+        max_parse_retries = 3
+        last_error: Exception | None = None
 
-        llm_start = time.monotonic()
-
-        # Run LLM call with progress updates
-        llm_task = asyncio.create_task(
-            asyncio.to_thread(
+        for parse_attempt in range(max_parse_retries):
+            response = await asyncio.to_thread(
                 self.llm_client.complete,
                 prompt=prompt,
                 system="You are a strict compliance reviewer. Output only valid JSON.",
             )
+
+            try:
+                report = parse_compliance_response(response, self.agents_doc)
+                state.plan_review_attempts += 1
+
+                logger.info(
+                    f"Plan review attempt {state.plan_review_attempts}: "
+                    f"compliant={report.is_compliant}"
+                )
+
+                return report
+            except (ValueError, KeyError) as e:
+                last_error = e
+                logger.warning(
+                    f"JSON parse error on attempt {parse_attempt + 1}/{max_parse_retries}: {e}"
+                )
+                # Modify prompt to emphasize JSON format
+                prompt = (
+                    f"Your previous response had invalid JSON. "
+                    f"You MUST output valid JSON only.\n\n{prompt}"
+                )
+
+        # All retries failed - raise the last error
+        raise RuntimeError(
+            f"Failed to parse compliance response after {max_parse_retries} attempts: "
+            f"{last_error}"
         )
 
-        # Update progress every 0.5 seconds while waiting for LLM
-        while not llm_task.done():
-            elapsed = time.monotonic() - llm_start
-            if progress_callback:
-                await progress_callback(elapsed, review_type)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(llm_task), timeout=0.5)
+    async def _review_work(
+        self,
+        state: ComplianceState,
+        work_summary: str,
+        session_id: str,
+    ) -> ComplianceReport:
+        """Review accumulated work for compliance.
 
-        review_response = await llm_task
-        llm_duration = time.monotonic() - llm_start
-        logger.debug(f"LLM compliance review took {llm_duration:.2f}s")
+        Args:
+            state: Compliance state for the session.
+            work_summary: Summary of work completed by the inner agent.
+            session_id: ACP session identifier.
 
-        if lightweight:
-            report = parse_lightweight_response(review_response)
-        else:
-            report = parse_compliance_response(review_response, self.agents_doc)
-        report.proposed_action = action[:100] + "..." if len(action) > 100 else action
-        report.attempt_number = state.current_attempt + 1
+        Returns:
+            ComplianceReport with scores and revision guidance.
+        """
+        self._load_agents_md()
 
-        state.record_attempt(report)
+        if self.agents_doc is None:
+            raise RuntimeError("Failed to load AGENTS.md")
 
-        total_duration = time.monotonic() - start_time
-        review_type = "lightweight" if lightweight else "full"
-        logger.info(
-            f"Compliance review ({review_type}) completed in {total_duration:.2f}s, "
-            f"compliant={report.is_compliant}"
+        prompt = build_batch_work_review_prompt(
+            self.agents_doc,
+            state.current_user_prompt,
+            state.approved_plan,
+            work_summary,
+            state.tool_call_history,
         )
 
-        return report
+        # Retry up to 3 times on JSON parse failures
+        max_parse_retries = 3
+        last_error: Exception | None = None
+
+        for parse_attempt in range(max_parse_retries):
+            response = await asyncio.to_thread(
+                self.llm_client.complete,
+                prompt=prompt,
+                system="You are a strict compliance reviewer. Output only valid JSON.",
+            )
+
+            try:
+                report = parse_compliance_response(response, self.agents_doc)
+                logger.info(f"Work review: compliant={report.is_compliant}")
+                return report
+            except (ValueError, KeyError) as e:
+                last_error = e
+                logger.warning(
+                    f"JSON parse error on attempt {parse_attempt + 1}/{max_parse_retries}: {e}"
+                )
+                prompt = (
+                    f"Your previous response had invalid JSON. "
+                    f"You MUST output valid JSON only.\n\n{prompt}"
+                )
+
+        raise RuntimeError(
+            f"Failed to parse compliance response after {max_parse_retries} attempts: "
+            f"{last_error}"
+        )
+
+    async def _check_ready_for_review(
+        self,
+        state: ComplianceState,
+        recent_output: str,
+    ) -> bool:
+        """Check if work is ready for compliance review using Haiku.
+
+        Args:
+            state: Compliance state for the session.
+            recent_output: Recent inner agent output to evaluate.
+
+        Returns:
+            True if work is ready for review.
+        """
+        classify_client = get_classify_client(self.classify_model)
+
+        try:
+            ready = await asyncio.to_thread(
+                is_ready_for_review,
+                classify_client,
+                recent_output,
+            )
+            logger.info(f"Review readiness check: ready={ready}")
+            return ready
+        except InvalidReviewReadinessResponse as e:
+            logger.warning(f"Review readiness check failed: {e}")
+            # Default to not ready if check fails
+            return False
+
+    async def _parse_and_send_plan(
+        self,
+        state: ComplianceState,
+        plan_text: str,
+        session_id: str,
+    ) -> None:
+        """Parse an approved plan into tasks and send the plan widget.
+
+        Args:
+            state: Compliance state for the session.
+            plan_text: The approved plan text.
+            session_id: ACP session identifier.
+        """
+        classify_client = get_classify_client(self.classify_model)
+
+        try:
+            task_descriptions = await asyncio.to_thread(
+                parse_plan_tasks,
+                classify_client,
+                plan_text,
+            )
+
+            # Store tasks in state
+            state.plan_tasks = [PlanTask(content=desc) for desc in task_descriptions]
+
+            # Send plan widget to UI
+            entries = [
+                plan_entry(task.content, status=task.status)
+                for task in state.plan_tasks
+            ]
+            plan_update = update_plan(entries)
+            await self._conn.session_update(session_id=session_id, update=plan_update)
+
+            logger.info(f"Sent plan widget with {len(state.plan_tasks)} tasks")
+
+        except InvalidPlanParseResponse as e:
+            logger.warning(f"Failed to parse plan into tasks: {e}")
+            # Continue without plan widget if parsing fails
+
+    async def _send_plan_update(
+        self,
+        state: ComplianceState,
+        session_id: str,
+    ) -> None:
+        """Send current plan task status to UI.
+
+        Args:
+            state: Compliance state for the session.
+            session_id: ACP session identifier.
+        """
+        if not state.plan_tasks:
+            return
+
+        entries = [
+            plan_entry(task.content, status=task.status)
+            for task in state.plan_tasks
+        ]
+        plan_update = update_plan(entries)
+        await self._conn.session_update(session_id=session_id, update=plan_update)
+
+    async def _update_task_progress(
+        self,
+        state: ComplianceState,
+        recent_output: str,
+        session_id: str,
+    ) -> None:
+        """Detect and update task progress based on recent output.
+
+        Args:
+            state: Compliance state for the session.
+            recent_output: Recent inner agent output to analyze.
+            session_id: ACP session identifier.
+        """
+        if not state.plan_tasks:
+            return
+
+        classify_client = get_classify_client(self.classify_model)
+
+        try:
+            task_descriptions = [task.content for task in state.plan_tasks]
+            progress = await asyncio.to_thread(
+                detect_task_progress,
+                classify_client,
+                task_descriptions,
+                recent_output,
+            )
+
+            if not progress:
+                return
+
+            # Update task statuses
+            for idx, new_status in progress.items():
+                if 0 <= idx < len(state.plan_tasks):
+                    state.plan_tasks[idx].status = new_status
+
+            # Send updated plan to UI
+            await self._send_plan_update(state, session_id)
+            logger.info(f"Updated task progress: {progress}")
+
+        except Exception as e:
+            logger.warning(f"Failed to detect task progress: {e}")
 
     def _build_system_prompt(self) -> str:
         """Build system prompt that includes AGENTS.md."""
@@ -581,184 +702,17 @@ class DeltaAgent(Agent):
                 input_params: dict[str, Any],
                 context: ToolPermissionContext,
             ) -> PermissionResultAllow | PermissionResultDeny:
-                """Review tool for compliance and request user permission.
+                """Request user permission for tool execution.
 
-                Compliance review occurs before tool execution. If compliance
-                fails, the tool is denied without executing.
+                Tools proceed with user permission only. Compliance review happens
+                at batch level (after work is ready), not per-action.
 
                 Returns:
                     PermissionResultAllow or PermissionResultDeny from claude_agent_sdk.
-                    Must return SDK types, not raw dicts, or the inner agent receives
-                    confusing error messages about "invalid response type".
-
-                Note on interrupt flag:
-                    When denying, interrupt=False allows the inner agent to continue
-                    and try a different approach. interrupt=True abruptly stops the
-                    agent's turn, which can cause confusion as the agent does not
-                    receive proper context about why it was stopped.
                 """
-                import sys
-
                 tool_description = self._format_tool_action(tool_name, input_params)
                 logger.info(f"Tool call: {tool_name} - {tool_description}")
 
-                # Determine if this is a read-only operation (lightweight review)
-                # Known read-only tools get instant classification
-                known_read_only_tools = {
-                    "Read",
-                    "mcp__acp__Read",
-                    "Glob",
-                    "Grep",
-                    "Task",  # Task spawns subagents for exploration
-                }
-                if tool_name in known_read_only_tools:
-                    is_read_only = True
-                else:
-                    # Use fast LLM (Haiku) to classify unknown actions
-                    fast_client = get_fast_client()
-                    is_read_only = await asyncio.to_thread(
-                        classify_action_type, fast_client, tool_description
-                    )
-
-                try:
-                    # Show progress as a native tool call block
-                    review_id = f"review_{uuid4().hex[:8]}"
-                    review_type_label = "quick" if is_read_only else "full"
-                    logger.debug(f"Creating progress block: {review_id}")
-                    sys.stderr.flush()
-                    review_start = start_tool_call(
-                        tool_call_id=review_id,
-                        title=f"Reviewing compliance ({review_type_label})...",
-                        kind="think",
-                        status="in_progress",
-                    )
-                    logger.debug("start_tool_call returned")
-                    sys.stderr.flush()
-                    await self._conn.session_update(session_id=session_id, update=review_start)
-                    logger.debug("session_update completed")
-
-                    # Progress callback to update UI with elapsed time
-                    async def update_progress(elapsed: float, review_type: str) -> None:
-                        title = f"Reviewing compliance ({review_type}, {elapsed:.1f}s)..."
-                        progress_update = update_tool_call(
-                            tool_call_id=review_id,
-                            title=title,
-                        )
-                        await self._conn.session_update(
-                            session_id=session_id, update=progress_update
-                        )
-
-                    report = await self._perform_compliance_review(
-                        state,
-                        tool_description,
-                        state.current_user_prompt,
-                        state.user_request_history,
-                        lightweight=is_read_only,
-                        progress_callback=update_progress,
-                    )
-                    logger.info(f"Compliance review done: {report.is_compliant}")
-
-                    if not report.is_compliant:
-                        # Build detailed failure message with justifications
-                        failure_details = []
-                        for section in report.failing_sections:
-                            failure_details.append(
-                                f"- §{section.section_number} {section.section_name}: "
-                                f"{section.format_score()}"
-                            )
-                            for g in section.guideline_scores:
-                                if not g.score.is_passing and g.justification:
-                                    failure_details.append(
-                                        f"  - {g.guideline_id}: {g.justification}"
-                                    )
-
-                        failing_text = "\n".join(failure_details)
-                        logger.warning(f"Tool action failed compliance:\n{failing_text}")
-
-                        # Update tool call to show failure
-                        review_update = update_tool_call(
-                            tool_call_id=review_id,
-                            status="failed",
-                        )
-                        await self._conn.session_update(session_id=session_id, update=review_update)
-
-                        # Show failure details as text
-                        compliance_msg = f"\n\n**Compliance Review Failed**\n\n{failing_text}\n"
-                        chunk = update_agent_message(text_block(compliance_msg))
-                        await self._conn.session_update(session_id=session_id, update=chunk)
-
-                        # After max_attempts failures, guide the agent to fix or escalate
-                        # Check if global failure limit reached - MUST escalate to user
-                        # This is the ultimate safeguard against infinite loops
-                        if state.must_escalate:
-                            logger.warning(
-                                f"Global failure limit ({GLOBAL_FAILURE_LIMIT}) reached. "
-                                "Interrupting agent to escalate to user."
-                            )
-                            return PermissionResultDeny(
-                                message=(
-                                    f"COMPLIANCE BLOCKED: {GLOBAL_FAILURE_LIMIT} total "
-                                    f"failures reached.\n\n"
-                                    f"Latest failure:\n{failing_text}\n\n"
-                                    "You have exhausted all compliance retry attempts. "
-                                    "You MUST now choose one of these options:\n"
-                                    "1. Try a completely different approach to achieve "
-                                    "the user's goal\n"
-                                    "2. Ask the user for clarification on how to proceed\n\n"
-                                    "Do NOT retry the same type of action. The compliance "
-                                    "reviewer has blocked this approach."
-                                ),
-                                interrupt=True,
-                            )
-
-                        # Per-action limit reached but global limit not yet hit
-                        # Reset per-action counter and allow retry with guidance
-                        if state.blocked:
-                            state.blocked = False
-                            state.current_attempt = 0
-
-                            return PermissionResultDeny(
-                                message=(
-                                    f"Compliance review failed (attempt "
-                                    f"{state.global_failure_count}/{GLOBAL_FAILURE_LIMIT} "
-                                    f"global):\n{failing_text}\n\n"
-                                    "IMMEDIATELY retry with a different approach. "
-                                    "Do NOT stop or ask the user - fix and retry now. "
-                                    f"After {GLOBAL_FAILURE_LIMIT} total failures, you "
-                                    "will be required to escalate to the user."
-                                ),
-                                interrupt=False,
-                            )
-
-                        return PermissionResultDeny(
-                            message=(
-                                f"Action failed compliance review "
-                                f"({state.global_failure_count}/{GLOBAL_FAILURE_LIMIT} "
-                                f"global):\n{failing_text}\n\n"
-                                "IMMEDIATELY retry with a corrected approach. "
-                                "Do NOT stop or ask the user - fix the issue and try again now."
-                            ),
-                            interrupt=False,
-                        )
-
-                    # Update tool call to show success
-                    review_update = update_tool_call(
-                        tool_call_id=review_id,
-                        status="completed",
-                    )
-                    await self._conn.session_update(session_id=session_id, update=review_update)
-                except Exception as e:
-                    # Fail-safe: if compliance review errors, deny the action
-                    logger.exception(f"Compliance review error: {e}")
-                    sys.stderr.flush()
-                    return PermissionResultDeny(
-                        message=(
-                            f"Compliance review failed with error: {e}. Action denied for safety."
-                        ),
-                        interrupt=True,
-                    )
-
-                # Compliance passed; request user permission
                 tool_call_id = f"tool_{uuid4().hex[:8]}"
 
                 # Build rich content for file operations
@@ -1042,47 +996,52 @@ class DeltaAgent(Agent):
                         await self._conn.session_update(session_id=session_id, update=chunk)
 
                     elif isinstance(block, ToolUseBlock):
-                        # Show tool use in UI
-                        tool_call_id = f"inner_{block.id[:8]}"
-                        tool_calls[block.id] = tool_call_id
-                        tool_title = self._format_tool_action(block.name, block.input)
-                        tool_start = start_tool_call(
-                            tool_call_id=tool_call_id,
-                            title=tool_title,
-                            status="in_progress",
-                        )
-                        await self._conn.session_update(session_id=session_id, update=tool_start)
+                        # Tool calls are displayed by handle_tool_permission
+                        # Just track the ID for result handling
+                        tool_calls[block.id] = block.id
 
-                    elif isinstance(block, ToolResultBlock):
-                        # Update tool call status based on result
-                        result_tool_call_id = tool_calls.get(block.tool_use_id)
-                        if result_tool_call_id:
-                            status: Literal["failed", "completed"] = (
-                                "failed" if block.is_error else "completed"
-                            )
-                            tool_update = update_tool_call(
-                                tool_call_id=result_tool_call_id,
-                                status=status,
-                            )
-                            await self._conn.session_update(
-                                session_id=session_id, update=tool_update
-                            )
+        return response_text
 
-                        # Record runtime errors so recovery attempts are not penalized
-                        if block.is_error:
-                            tool_use_id = block.tool_use_id
-                            # Extract error message from content
-                            error_msg = ""
-                            if isinstance(block.content, str):
-                                error_msg = block.content
-                            elif isinstance(block.content, list):
-                                for item in block.content:
-                                    if hasattr(item, "text"):
-                                        error_msg = item.text
-                                        break
-                            # Get the tool description from history if available
-                            tool_desc = f"tool_{tool_use_id[:8]}"
-                            state.record_runtime_error(tool_desc, error_msg)
+    async def _call_inner_agent_silent(
+        self,
+        state: ComplianceState,
+        prompt: str | list[dict[str, Any]],
+        session_id: str,
+    ) -> str:
+        """Call the inner agent without displaying output to the UI.
+
+        Used during planning phase where only the final approved plan is shown.
+
+        Args:
+            state: Compliance state for the session.
+            prompt: Either a string or list of Claude API content blocks.
+            session_id: ACP session identifier.
+
+        Returns:
+            The inner agent's text response.
+        """
+        client = await self._get_inner_client(state, session_id)
+
+        if isinstance(prompt, str):
+            await client.query(prompt)
+        else:
+            async def message_stream() -> AsyncIterator[dict[str, Any]]:
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": prompt},
+                    "parent_tool_use_id": None,
+                    "session_id": "default",
+                }
+
+            await client.query(message_stream())
+
+        response_text = ""
+
+        async for message in client.receive_response():
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        response_text += block.text
 
         return response_text
 
@@ -1173,11 +1132,13 @@ class DeltaAgent(Agent):
         session_id: str,
         **kwargs: Any,
     ) -> PromptResponse:
-        """Handle a prompt by forwarding to the inner agent.
+        """Handle a prompt through triage, planning, execution, and review.
 
-        Compliance is enforced at the tool level: each tool call is reviewed
-        before execution via handle_tool_permission. This method forwards
-        prompts to the inner agent and streams responses back.
+        Workflow:
+        1. Triage: Haiku determines if message needs planning or direct answer
+        2. Planning: Request YAML plan, review until 5/5 (target: 3 attempts, max: 5)
+        3. Execution: Inner agent implements plan
+        4. Review: Check work compliance, revise if needed
         """
         logger.info(f"Received prompt for session {session_id}")
         state = self._get_state(session_id)
@@ -1191,24 +1152,310 @@ class DeltaAgent(Agent):
             await self._conn.session_update(session_id=session_id, update=chunk)
             return PromptResponse(stop_reason="end_turn")
 
-        # Reset compliance attempt counter for new user prompts
-        state.reset()
+        # Reset state for new user prompt
+        state.reset_for_new_prompt()
         state.current_user_prompt = prompt_text
         state.user_request_history.append(prompt_text)
 
         # Check if prompt contains images
         has_images = any(block.get("type") == "image" for block in prompt_content)
-        inner_prompt: str | list[dict[str, Any]] = prompt_content if has_images else prompt_text
-
-        logger.info(f"Calling inner agent (has_images={has_images})")
 
         try:
-            await self._call_inner_agent(state, inner_prompt, session_id)
+            # === TRIAGE: Determine if planning is needed ===
+            classify_client = get_classify_client(self.classify_model)
+            try:
+                triage_result = await asyncio.to_thread(
+                    triage_user_message,
+                    classify_client,
+                    prompt_text,
+                )
+            except InvalidTriageResponse:
+                # Default to planning if triage fails
+                triage_result = "PLAN"
+
+            if triage_result == "ANSWER":
+                # Direct answer - no planning needed
+                logger.info("Triage: Direct answer (no planning)")
+                if has_images:
+                    await self._call_inner_agent(state, prompt_content, session_id)
+                else:
+                    await self._call_inner_agent(state, prompt_text, session_id)
+                return PromptResponse(stop_reason="end_turn")
+
+            # === PHASE 1: PLANNING ===
+            logger.info("Phase 1: Planning")
+            state.phase = WorkflowPhase.PLANNING
+
+            # Show planning block with spinner
+            plan_block_id = f"plan_{uuid4().hex[:8]}"
+            plan_block = start_tool_call(
+                tool_call_id=plan_block_id,
+                title="Planning...",
+                kind="think",
+                status="in_progress",
+            )
+            await self._conn.session_update(session_id=session_id, update=plan_block)
+
+            # Request YAML plan from inner agent (silently - no text output)
+            plan_prompt = f"""\
+Create an implementation plan for this request. Output ONLY a YAML plan.
+
+REQUEST:
+{prompt_text}
+
+PLAN FORMAT (YAML only, no code, no markdown):
+```yaml
+goal: <one-line description of what will be achieved>
+tasks:
+  - description: <what this task accomplishes>
+    files: [<files to read or modify>]
+  - description: <next task>
+    files: [<files>]
+documentation:
+  - <doc file to update, if any exist for affected area>
+tests:
+  - <test file to create or update>
+```
+
+RULES:
+- Output ONLY the YAML plan, no other text
+- Do NOT include code snippets in the plan
+- Each task is a discrete step the user can track
+- Include documentation updates if docs exist for the affected area
+- Include tests for new features or bug fixes
+"""
+            if has_images:
+                plan_prompt_content = [*prompt_content, {"type": "text", "text": plan_prompt}]
+                plan_response = await self._call_inner_agent_silent(
+                    state, plan_prompt_content, session_id
+                )
+            else:
+                plan_response = await self._call_inner_agent_silent(
+                    state, plan_prompt, session_id
+                )
+
+            # Review plan (target: pass in 3, max: 5 attempts)
+            while state.plan_review_attempts < state.max_plan_attempts:
+                attempt = state.plan_review_attempts + 1
+                max_attempts = state.max_plan_attempts
+                remaining = max_attempts - attempt
+
+                # Update planning block status
+                plan_update = update_tool_call(
+                    tool_call_id=plan_block_id,
+                    title=f"Reviewing plan (attempt {attempt}/{max_attempts})...",
+                )
+                await self._conn.session_update(session_id=session_id, update=plan_update)
+
+                report = await self._review_plan(state, plan_response, session_id)
+
+                if report.is_compliant:
+                    state.approved_plan = plan_response
+
+                    # Update planning block to completed
+                    plan_update = update_tool_call(
+                        tool_call_id=plan_block_id,
+                        title="Plan approved",
+                        status="completed",
+                    )
+                    await self._conn.session_update(session_id=session_id, update=plan_update)
+
+                    # Parse plan into tasks and send plan widget
+                    await self._parse_and_send_plan(state, plan_response, session_id)
+
+                    # Show the approved plan
+                    plan_msg = f"\n\n**Approved Plan:**\n\n{plan_response}\n"
+                    chunk = update_agent_message(text_block(plan_msg))
+                    await self._conn.session_update(session_id=session_id, update=chunk)
+                    break
+
+                if state.plan_review_attempts >= state.max_plan_attempts:
+                    # Update planning block to failed
+                    plan_update = update_tool_call(
+                        tool_call_id=plan_block_id,
+                        title=f"Plan review failed after {max_attempts} attempts",
+                        status="failed",
+                    )
+                    await self._conn.session_update(session_id=session_id, update=plan_update)
+
+                    # Build list of failing guidelines
+                    failing_guidelines = []
+                    for section in report.failing_sections:
+                        for g in section.guideline_scores:
+                            if not g.score.is_passing:
+                                failing_guidelines.append(
+                                    f"- **{g.guideline_id}**: {g.justification}"
+                                )
+
+                    # Generate context-specific questions using Haiku
+                    violations_for_questions = [
+                        f"{g.guideline_id}: {g.justification}"
+                        for section in report.failing_sections
+                        for g in section.guideline_scores
+                        if not g.score.is_passing
+                    ]
+                    questions = await asyncio.to_thread(
+                        generate_clarifying_questions,
+                        classify_client,
+                        prompt_text,
+                        violations_for_questions,
+                    )
+
+                    # Format numbered questions
+                    numbered_questions = "\n".join(
+                        f"{i + 1}. {q}" for i, q in enumerate(questions)
+                    )
+
+                    # Escalate to user with specific questions
+                    escalate_msg = (
+                        f"\n\n**I need clarification to proceed.**\n\n"
+                        f"After {max_attempts} attempts, I could not create a compliant plan.\n\n"
+                        f"**Unresolved issues:**\n"
+                        + "\n".join(failing_guidelines)
+                        + f"\n\n**Questions:**\n{numbered_questions}\n"
+                    )
+                    chunk = update_agent_message(text_block(escalate_msg))
+                    await self._conn.session_update(session_id=session_id, update=chunk)
+                    return PromptResponse(stop_reason="end_turn")
+
+                # Update status for revision
+                plan_update = update_tool_call(
+                    tool_call_id=plan_block_id,
+                    title=f"Revising plan (attempt {attempt + 1}/{max_attempts})...",
+                )
+                await self._conn.session_update(session_id=session_id, update=plan_update)
+
+                # Build clear violation feedback
+                violations = []
+                for section in report.failing_sections:
+                    for g in section.guideline_scores:
+                        if not g.score.is_passing:
+                            violations.append(
+                                f"- {g.guideline_id} ({g.score}): {g.justification}"
+                            )
+
+                urgency = ""
+                if remaining <= 2:
+                    urgency = (
+                        f"\n\n⚠️ URGENT: You have {remaining} attempt(s) remaining. "
+                        f"Address ALL violations below or provide numbered questions "
+                        f"if you need clarification from the user."
+                    )
+
+                # Request revised plan with clear feedback
+                revise_prompt = f"""\
+Your plan FAILED compliance review. You MUST fix these violations:{urgency}
+
+VIOLATIONS:
+{chr(10).join(violations)}
+
+{f"REVISION GUIDANCE: {report.revision_guidance}" if report.revision_guidance else ""}
+
+REQUIREMENTS:
+1. Output ONLY a YAML plan (no code, no markdown explanation)
+2. Address EVERY violation listed above
+3. If you cannot address a violation, explain why in a numbered question format
+
+ORIGINAL REQUEST:
+{prompt_text}
+
+Provide your revised YAML plan now:
+"""
+                plan_response = await self._call_inner_agent_silent(
+                    state, revise_prompt, session_id
+                )
+
+            # === PHASE 2: EXECUTION ===
+            logger.info("Phase 2: Execution")
+            state.phase = WorkflowPhase.EXECUTING
+
+            execute_prompt = (
+                f"Implement the approved plan. Proceed with the implementation now.\n\n"
+                f"Plan:\n{state.approved_plan}"
+            )
+            work_response = await self._call_inner_agent(state, execute_prompt, session_id)
+            state.work_summary = work_response
+
+            # Update task progress after execution
+            await self._update_task_progress(state, work_response, session_id)
+
+            # === PHASE 3: REVIEW CYCLE ===
+            while True:
+                # Check if work is ready for review
+                ready = await self._check_ready_for_review(state, work_response)
+
+                if ready:
+                    logger.info("Phase 3: Reviewing work")
+                    state.phase = WorkflowPhase.REVIEWING
+
+                    # Show review block with spinner
+                    review_block_id = f"review_{uuid4().hex[:8]}"
+                    review_block = start_tool_call(
+                        tool_call_id=review_block_id,
+                        title="Reviewing completed work...",
+                        kind="think",
+                        status="in_progress",
+                    )
+                    await self._conn.session_update(
+                        session_id=session_id, update=review_block
+                    )
+
+                    report = await self._review_work(state, state.work_summary, session_id)
+
+                    if report.is_compliant:
+                        state.phase = WorkflowPhase.COMPLETE
+
+                        # Mark all tasks as completed
+                        for task in state.plan_tasks:
+                            task.status = "completed"
+                        await self._send_plan_update(state, session_id)
+
+                        # Update review block to completed
+                        review_update = update_tool_call(
+                            tool_call_id=review_block_id,
+                            title="Work approved",
+                            status="completed",
+                        )
+                        await self._conn.session_update(
+                            session_id=session_id, update=review_update
+                        )
+                        break
+
+                    # Update review block to failed
+                    review_update = update_tool_call(
+                        tool_call_id=review_block_id,
+                        title="Work review failed - revising",
+                        status="failed",
+                    )
+                    await self._conn.session_update(
+                        session_id=session_id, update=review_update
+                    )
+
+                    # Request revision from inner agent
+                    revise_prompt = (
+                        f"Your work failed compliance review. Please revise:\n\n"
+                        f"{report.format()}\n\n"
+                        f"Revision guidance: {report.revision_guidance}\n\n"
+                        f"Make the necessary changes to achieve 5/5 on all guidelines."
+                    )
+                    work_response = await self._call_inner_agent(
+                        state, revise_prompt, session_id
+                    )
+                    state.work_summary += f"\n\n[Revision]\n{work_response}"
+
+                    # Update task progress after revision
+                    await self._update_task_progress(state, work_response, session_id)
+                else:
+                    # Not ready - work is still in progress, wait for next iteration
+                    # The inner agent should continue working
+                    logger.info("Work not ready for review, continuing execution")
+                    break
+
         except Exception as e:
             error_msg = f"Error: {e}"
             chunk = update_agent_message(text_block(error_msg))
             await self._conn.session_update(session_id=session_id, update=chunk)
-            logger.exception(f"Inner agent error: {e}")
+            logger.exception(f"Workflow error: {e}")
 
         return PromptResponse(stop_reason="end_turn")
 
@@ -1241,16 +1488,16 @@ class DeltaAgent(Agent):
 
 async def run_server(
     agents_md_path: Path | None = None,
-    max_attempts: int = 2,
-    llm_model: str | None = None,
+    review_model: str | None = None,
+    classify_model: str = "haiku",
 ) -> None:
     """Run the Delta ACP server."""
     from acp import stdio_streams
 
     agent = DeltaAgent(
         agents_md_path=agents_md_path,
-        max_attempts=max_attempts,
-        llm_model=llm_model,
+        review_model=review_model,
+        classify_model=classify_model,
     )
 
     # Use larger buffer limit (16MB) to handle base64-encoded images

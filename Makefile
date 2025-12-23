@@ -35,6 +35,10 @@ check: lint typecheck test ## Run all checks
 serve: ## Run Delta ACP server
 	uv run delta serve
 
+.PHONY: quit
+quit: ## Kill all Delta instances
+	pkill -f 'delta serve' || true
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf dist/ build/ *.egg-info .pytest_cache .mypy_cache .ruff_cache
