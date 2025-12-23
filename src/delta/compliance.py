@@ -150,24 +150,26 @@ Rules:
 
 
 COMPLIANCE_REVIEW_PROMPT = """\
-You are a compliance reviewer.
-Evaluate whether the proposed action complies with AGENTS.md guidelines.
+You are a compliance reviewer. Your ONLY task: check whether a proposed action violates
+an explicit guideline in AGENTS.md.
 
-IMPORTANT CONTEXT:
-- You are reviewing an AI agent's proposed action BEFORE it executes
-- The "Current User Request" is the most recent message from the human
-- The "Prior User Requests" show ALL previous messages from the human in this session
-- The "Previous Actions" show what tool calls have already been made in this session
-- You are NOT reviewing user feedback - only checking compliance with AGENTS.md
-- Do NOT assume the user has rejected or approved anything unless explicitly stated
-- Do NOT confuse previous compliance failures with user feedback
+## Your Scope (What You Evaluate)
 
-CRITICAL - AUTHORIZATION FROM PRIOR REQUESTS:
-- If a user explicitly requested an action in ANY prior message, that request remains valid
-- Example: If the user said "create documentation" in message 1, and the agent is now
-  creating documentation in response to message 3, this is AUTHORIZED
-- Prior user requests carry forward as authorization for related actions
-- The agent should not need to re-ask permission for actions the user already requested
+1. Does the action contradict a specific, numbered guideline in AGENTS.md?
+2. If yes, cite the guideline number and explain the violation.
+3. If no explicit guideline is violated, the action is COMPLIANT.
+
+## Outside Your Scope (Do Not Evaluate)
+
+- Runtime success or failure (handled separately)
+- Implementation strategy or efficiency
+- Whether a different approach would be better
+- Hypothetical problems that might occur
+
+## Authorization Context
+
+Prior user requests authorize related actions. If the user requested something in an
+earlier message, the agent does not need to re-ask permission.
 
 ## AGENTS.md Content
 
@@ -205,29 +207,10 @@ Evaluate the proposed action against EVERY major section in AGENTS.md. For each 
 3. Calculate the average score for the major section (excluding N/A scores)
 4. Provide a brief justification
 
-RECOVERY AND SELF-CORRECTION - CRITICAL:
-- When the agent's previous action FAILED (marked [DENIED] or [RUNTIME_ERROR]), and the
-  current action is a DIFFERENT approach to achieve the same goal, this is RECOVERY
-- Recovery is POSITIVE behaviour - the agent is self-correcting
-- Evaluate the NEW action on its own merits, not as a continuation of the failure
-- Do NOT penalise the agent for previous failed attempts when reviewing a recovery action
-- [RUNTIME_ERROR] entries indicate environmental failures (interactive mode unavailable,
-  file not found, network timeout) - these are NOT compliance violations
-- Example: If `git add -p` failed with [RUNTIME_ERROR] because interactive mode is
-  unavailable, and the agent now proposes `git add <file>`, evaluate `git add <file>`
-  independently - it is fully compliant (guideline 3.2.1 allows staging entire files
-  when all changes belong to commit)
-- The goal is to help the agent succeed, not to block it for trying alternatives
-
-HOLISTIC EVALUATION - CRITICAL:
-- Read and consider ALL guidelines before making a judgement
-- Guidelines within the same section may provide exceptions or context for each other
-- When one guideline seems to conflict with another, the more specific guideline applies
-- Example: 4.2.2 says "one goal per commit" but 4.5.1 says "amend recent commits when
-  adding related fixes" - if the action is amending a commit with a related fix, 4.5.1
-  takes precedence because it is the more specific rule for that situation
-- Do NOT fixate on a single guideline - evaluate the complete picture
-- Consider the intent behind the guidelines, not just literal interpretation
+Evaluation principles:
+- Evaluate the proposed action independently of previous failures
+- When guidelines conflict, the more specific guideline applies
+- [RUNTIME_ERROR] entries are environmental failures, not compliance violations
 
 ## Required Output Format
 
@@ -255,16 +238,12 @@ You MUST output a JSON object with this exact structure:
 }}
 ```
 
-CRITICAL REQUIREMENTS:
-- You MUST include ALL major sections from AGENTS.md in your response
-- Every major section must appear in the "sections" array, even if all its guidelines are N/A
-- Skipping ANY section is a fatal error - the review will be rejected
-- Use N/A for guidelines that do not apply to the action type
-- Only score guidelines that are directly relevant to the proposed action
-- If ANY applicable section scores below 5.0 average, set overall_compliant to false
-- Focus on the specific action being proposed, not hypothetical issues
+Output requirements:
+- Include ALL major sections from AGENTS.md (use N/A for inapplicable guidelines)
+- Set overall_compliant to false if ANY section scores below 5.0 average
+- Only cite explicit guideline violations, not hypothetical issues
 
-SECTION CHECKLIST - Verify you included all of these:
+Section checklist:
 {section_checklist}
 """
 

@@ -104,7 +104,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 2.5 Tools and Commands
 
-- 2.5.1: Do not use interactive CLI tools that block waiting for user input, such as `less`, `vim`, `git rebase -i`, or `nano`. Commands that accept input via stdin (for example, `git add -p` with scripted responses) are permitted.
+- 2.5.1: Commands cannot receive interactive input during execution. Do not use commands that prompt for input, open editors, or display pagers. Find scripted alternatives: pipe predetermined input (for example, `printf 'y\nn\n' | git add -p`), set environment variables to bypass editors (for example, `GIT_EDITOR=true git rebase --continue`), or use flags that skip interaction (for example, `git commit --no-edit`, `yes | apt install`).
 - 2.5.2: Use the `--no-pager` flag for git commands, such as `git --no-pager log` and `git --no-pager diff`.
 - 2.5.3: Before running commands, examine the codebase to discover correct entrypoints. Check `pyproject.toml`, `package.json`, `Makefile`, or equivalent configuration files for test runners, linters, and build commands. Do not assume standard commands exist.
 

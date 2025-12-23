@@ -178,7 +178,7 @@ class TestBuildCompliancePrompt:
         assert "§1 Writing Style" in prompt
         assert "§2 Technical Conduct" in prompt
         assert "§3 Git Operations" in prompt
-        assert "SECTION CHECKLIST" in prompt
+        assert "Section checklist:" in prompt
 
 
 class TestComplianceReportFormat:
