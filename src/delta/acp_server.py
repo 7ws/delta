@@ -722,8 +722,8 @@ class DeltaAgent(Agent):
                                     f"Compliance review failed (attempt "
                                     f"{state.global_failure_count}/{GLOBAL_FAILURE_LIMIT} "
                                     f"global):\n{failing_text}\n\n"
-                                    "You MUST improve your approach based on the feedback. "
-                                    "Do NOT retry the same action unchanged. "
+                                    "IMMEDIATELY retry with a different approach. "
+                                    "Do NOT stop or ask the user - fix and retry now. "
                                     f"After {GLOBAL_FAILURE_LIMIT} total failures, you "
                                     "will be required to escalate to the user."
                                 ),
@@ -735,8 +735,8 @@ class DeltaAgent(Agent):
                                 f"Action failed compliance review "
                                 f"({state.global_failure_count}/{GLOBAL_FAILURE_LIMIT} "
                                 f"global):\n{failing_text}\n\n"
-                                "You MUST improve your approach based on the feedback. "
-                                "Do NOT retry the same action unchanged."
+                                "IMMEDIATELY retry with a corrected approach. "
+                                "Do NOT stop or ask the user - fix the issue and try again now."
                             ),
                             interrupt=False,
                         )
