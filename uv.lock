@@ -205,7 +205,7 @@ wheels = [
 ]
 
 [[package]]
-name = "delta-compliance"
+name = "delta-ai"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
