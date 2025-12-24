@@ -13,42 +13,66 @@ AI coding agents drift from your standards over long sessions. They forget commi
 Delta enforces your guidelines through autonomous review at natural checkpoints.
 
 ```
-User
-  │
-  ▼
-Inner Agent ──────────────────────────────────┐
-  │                                           │
-  │  ┌──────────────────────────────────────┐ │
-  │  │          Compliance Gate             │ │
-  │  │                                      │ │
-  │  │  Tool call ──▶ Review ──▶ AGENTS.md  │ │
-  │  │                  │                   │ │
-  │  │          ┌───────┴───────┐           │ │
-  │  │          ▼               ▼           │ │
-  │  │       Reject          Approve        │ │
-  │  │          │               │           │ │
-  │  │          ▼               ▼           │ │
-  │  │   Retry with        Execute tool     │ │
-  │  │   feedback               │           │ │
-  │  │                          │           │ │
-  │  └──────────────────────────│───────────┘ │
-  │                             │             │
-  ◀─────────────────────────────┘             │
-  │                                           │
-  ▼                                           │
-Response to user ◀────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                         Delta (ACP Server)                           │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │                        Inner Agent                             │  │
+│  │                                                                │  │
+│  │              Triage ───▶ Plan ───▶ Execute                     │  │
+│  │                           │           │                        │  │
+│  └───────────────────────────│───────────│────────────────────────┘  │
+│                              │           │                           │
+│                              ▼           │                           │
+│  ┌───────────────────────────────────────│────────────────────────┐  │
+│  │              Compliance Reviewer (Sonnet)                      │  │
+│  │                                       │                        │  │
+│  │         ┌─────────────────────────────│───┐                    │  │
+│  │         │       Plan Review ◀─────────┘   │                    │  │
+│  │         │            │                    │                    │  │
+│  │         │            ▼                    │                    │  │
+│  │         │   ┌────────┴────────┐           │                    │  │
+│  │         │   ▼                 ▼           │                    │  │
+│  │         │ < 5/5             5/5           │                    │  │
+│  │         │   │                 │           │                    │  │
+│  │         │   ▼                 │           │                    │  │
+│  │         │ Revise ─────────────┤           │                    │  │
+│  │         │ (max 5×)            │           │                    │  │
+│  │         │   │                 │           │                    │  │
+│  │         │   ▼                 ▼           │                    │  │
+│  │         │ Escalate        Execute ────────│───────────┐        │  │
+│  │         │ to user             │           │           │        │  │
+│  │         └─────────────────────│───────────┘           │        │  │
+│  │                               │                       │        │  │
+│  │         ┌─────────────────────│───────────────────────┘        │  │
+│  │         │       Work Review ◀─┘                                │  │
+│  │         │            │                                         │  │
+│  │         │            ▼                                         │  │
+│  │         │   ┌────────┴────────┐                                │  │
+│  │         │   ▼                 ▼                                │  │
+│  │         │ < 5/5             5/5                                │  │
+│  │         │   │                 │                                │  │
+│  │         │   ▼                 ▼                                │  │
+│  │         │ Revise          Complete ─────▶ Response to user     │  │
+│  │         │ (unlimited)                                          │  │
+│  │         └──────────────────────────────────────────────────────│  │
+│  │                                                                │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
 
-After 3 failed plan reviews: escalate to user for guidance.
+User Prompt ───▶ Triage
 ```
 
 ### Workflow
 
-1. **Plan**: The inner agent receives the user prompt and guidelines, then creates a plan.
-2. **Plan review**: The compliance reviewer validates the plan against all guideline sections. The inner agent revises until every section scores 5/5 (up to 3 attempts). After 3 failures, Delta escalates to the user.
-3. **Implement**: The inner agent executes the approved plan. Tool calls proceed with user permission.
-4. **Review check**: After each action, Haiku evaluates whether work is ready for review.
-5. **Compliance review**: When ready, Sonnet scores the accumulated work against all applicable guidelines. The inner agent revises until every section scores 5/5 (unlimited attempts during execution).
-6. **Complete**: Work is complete when the reviewer approves all sections.
+1. **Triage**: Haiku determines if the request requires implementation work or can be answered directly. Questions skip the planning phase.
+2. **Plan**: The inner agent creates a YAML plan for the requested work.
+3. **Plan review**: Sonnet scores the plan against all AGENTS.md sections. The inner agent revises until every section scores 5/5 (up to 5 attempts). After 5 failures, Delta escalates to the user with specific questions.
+4. **Execute**: The inner agent implements the approved plan. Tool calls require user permission.
+5. **Readiness check**: Haiku evaluates whether the work is ready for compliance review.
+6. **Work review**: Sonnet scores the accumulated work against all applicable guidelines. The inner agent revises until every section scores 5/5 (unlimited attempts).
+7. **Complete**: Work is complete when the reviewer approves all sections.
 
 ### Scoring
 
@@ -62,7 +86,7 @@ Each guideline section is scored independently:
 - **Atomic changes**: File edits are not blocked individually. The review evaluates the complete change set.
 - **Natural checkpoints**: Reviews occur when the inner agent signals readiness, not at arbitrary points.
 - **Guided revision**: The inner agent receives specific feedback and retries, rather than generic rejections.
-- **Escalation path**: Plan review escalates after 3 failures. Execution review allows unlimited revision.
+- **Escalation path**: Plan review escalates after 5 failures. Work review allows unlimited revision.
 
 ## Installation
 
