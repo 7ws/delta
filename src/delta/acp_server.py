@@ -1186,16 +1186,6 @@ class DeltaAgent(Agent):
             logger.info("Phase 1: Planning")
             state.phase = WorkflowPhase.PLANNING
 
-            # Show planning block with spinner
-            plan_block_id = f"plan_{uuid4().hex[:8]}"
-            plan_block = start_tool_call(
-                tool_call_id=plan_block_id,
-                title="Planning...",
-                kind="think",
-                status="in_progress",
-            )
-            await self._conn.session_update(session_id=session_id, update=plan_block)
-
             # Request YAML plan from inner agent (silently - no text output)
             plan_prompt = f"""\
 Create an implementation plan for this request. Output ONLY a YAML plan.
@@ -1240,25 +1230,28 @@ RULES:
                 max_attempts = state.max_plan_attempts
                 remaining = max_attempts - attempt
 
-                # Update planning block status
-                plan_update = update_tool_call(
-                    tool_call_id=plan_block_id,
-                    title=f"Reviewing plan (attempt {attempt}/{max_attempts})...",
+                # Create a review block for this attempt
+                review_block_id = f"plan_review_{attempt}_{uuid4().hex[:8]}"
+                review_block = start_tool_call(
+                    tool_call_id=review_block_id,
+                    title=f"Reviewing plan (attempt {attempt}/{max_attempts})",
+                    kind="think",
+                    status="in_progress",
                 )
-                await self._conn.session_update(session_id=session_id, update=plan_update)
+                await self._conn.session_update(session_id=session_id, update=review_block)
 
                 report = await self._review_plan(state, plan_response, session_id)
 
                 if report.is_compliant:
                     state.approved_plan = plan_response
 
-                    # Update planning block to completed
-                    plan_update = update_tool_call(
-                        tool_call_id=plan_block_id,
-                        title="Plan approved",
+                    # Update review block to completed
+                    review_update = update_tool_call(
+                        tool_call_id=review_block_id,
+                        title=f"Plan review {attempt}/{max_attempts}: Approved",
                         status="completed",
                     )
-                    await self._conn.session_update(session_id=session_id, update=plan_update)
+                    await self._conn.session_update(session_id=session_id, update=review_update)
 
                     # Parse plan into tasks and send plan widget
                     await self._parse_and_send_plan(state, plan_response, session_id)
@@ -1269,16 +1262,34 @@ RULES:
                     await self._conn.session_update(session_id=session_id, update=chunk)
                     break
 
+                # Build violation details for display
+                violation_lines = []
+                for section in report.failing_sections:
+                    for g in section.guideline_scores:
+                        if not g.score.is_passing:
+                            violation_lines.append(
+                                f"  - {g.guideline_id} ({g.score}): {g.justification}"
+                            )
+
+                violations_text = "\n".join(violation_lines) if violation_lines else "  (none)"
+
                 if state.plan_review_attempts >= state.max_plan_attempts:
-                    # Update planning block to failed
-                    plan_update = update_tool_call(
-                        tool_call_id=plan_block_id,
-                        title=f"Plan review failed after {max_attempts} attempts",
+                    # Final attempt failed - update block with violations
+                    review_update = update_tool_call(
+                        tool_call_id=review_block_id,
+                        title=f"Plan review {attempt}/{max_attempts}: Failed",
                         status="failed",
                     )
-                    await self._conn.session_update(session_id=session_id, update=plan_update)
+                    await self._conn.session_update(session_id=session_id, update=review_update)
 
-                    # Build list of failing guidelines
+                    # Show violations in a message
+                    violations_msg = (
+                        f"\n\n**Violations (attempt {attempt}):**\n{violations_text}\n"
+                    )
+                    chunk = update_agent_message(text_block(violations_msg))
+                    await self._conn.session_update(session_id=session_id, update=chunk)
+
+                    # Build list of failing guidelines for escalation
                     failing_guidelines = []
                     for section in report.failing_sections:
                         for g in section.guideline_scores:
@@ -1318,14 +1329,27 @@ RULES:
                     await self._conn.session_update(session_id=session_id, update=chunk)
                     return PromptResponse(stop_reason="end_turn")
 
-                # Update status for revision
-                plan_update = update_tool_call(
-                    tool_call_id=plan_block_id,
-                    title=f"Revising plan (attempt {attempt + 1}/{max_attempts})...",
-                )
-                await self._conn.session_update(session_id=session_id, update=plan_update)
+                # Build revision strategy text
+                revision_strategy = report.revision_guidance or "Address all violations listed."
 
-                # Build clear violation feedback
+                # Update review block with violations and revision strategy
+                review_update = update_tool_call(
+                    tool_call_id=review_block_id,
+                    title=f"Plan review {attempt}/{max_attempts}: Revising",
+                    status="failed",
+                )
+                await self._conn.session_update(session_id=session_id, update=review_update)
+
+                # Show violations and revision strategy in a message
+                attempt_summary = (
+                    f"\n\n**Plan Review (attempt {attempt}/{max_attempts})**\n\n"
+                    f"**Violations:**\n{violations_text}\n\n"
+                    f"**Revision Strategy:**\n{revision_strategy}\n"
+                )
+                chunk = update_agent_message(text_block(attempt_summary))
+                await self._conn.session_update(session_id=session_id, update=chunk)
+
+                # Build clear violation feedback for the agent
                 violations = []
                 for section in report.failing_sections:
                     for g in section.guideline_scores:

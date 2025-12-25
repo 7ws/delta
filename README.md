@@ -66,7 +66,7 @@ User Prompt ───▶ Triage
 
 ### Workflow
 
-1. **Triage**: Haiku determines if the request requires implementation work or can be answered directly. Questions skip the planning phase.
+1. **Triage**: Haiku determines if the request is read-only (questions, searches, status checks) or produces edits (file modifications, commits, builds). Read-only requests skip planning and review.
 2. **Plan**: The inner agent creates a YAML plan for the requested work.
 3. **Plan review**: Sonnet scores the plan against all AGENTS.md sections. The inner agent revises until every section scores 5/5 (up to 5 attempts). After 5 failures, Delta escalates to the user with specific questions.
 4. **Execute**: The inner agent implements the approved plan. Tool calls require user permission.

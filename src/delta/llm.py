@@ -132,13 +132,17 @@ def triage_user_message(
         User message:
         {message}
 
-        PLAN: The message requests implementation work that modifies code or files.
-        Examples: "Add a login button", "Fix the bug in...", "Refactor the...",
-        "Implement...", "Update the code to...", "Create a new..."
+        ANSWER: The message is read-only and produces no edits. This includes:
+        - Questions about the codebase ("How does X work?", "What is...", "Explain...")
+        - Search requests ("Find all uses of X", "Where is X defined?")
+        - Status checks ("What files changed?", "Show git status")
+        - Read operations ("Read file X", "Show me the contents of...")
 
-        ANSWER: The message is a question or request for information that does not
-        require code changes. Examples: "How does X work?", "What is...",
-        "Explain...", "Where is...", "Can you tell me...", "Why does..."
+        PLAN: The message produces edits or executes commands that change state. This includes:
+        - Creating, modifying, or deleting files
+        - Git commits, pushes, or any write operations
+        - Running build, test, or install commands that modify the filesystem
+        - Any explicit request to "add", "fix", "update", "implement", "create", "delete", "remove"
 
         Reply with exactly one word: PLAN or ANSWER\
     """)
