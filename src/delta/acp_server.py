@@ -668,7 +668,12 @@ class DeltaAgent(Agent):
             # Update task statuses
             for idx, new_status in progress.items():
                 if 0 <= idx < len(state.plan_tasks):
-                    state.plan_tasks[idx].status = new_status
+                    if new_status == "pending":
+                        state.plan_tasks[idx].status = "pending"
+                    elif new_status == "in_progress":
+                        state.plan_tasks[idx].status = "in_progress"
+                    elif new_status == "completed":
+                        state.plan_tasks[idx].status = "completed"
 
             # Send updated plan to UI
             await self._send_plan_update(state, session_id)

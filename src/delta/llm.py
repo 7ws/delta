@@ -176,6 +176,9 @@ def triage_user_message(
                 f"Invalid triage response after {max_retries + 1} attempts: {response}"
             )
 
+    # Unreachable: loop always returns or raises
+    raise InvalidTriageResponse("Unexpected exit from triage loop")
+
 
 def generate_clarifying_questions(
     client: ClaudeCodeClient,
@@ -354,6 +357,9 @@ def parse_plan_tasks(client: ClaudeCodeClient, plan: str, max_retries: int = 2) 
                 f"Failed to parse plan into tasks after {max_retries + 1} attempts"
             )
 
+    # Unreachable: loop always returns or raises
+    raise InvalidPlanParseResponse("Unexpected exit from parse loop")
+
 
 def detect_task_progress(
     client: ClaudeCodeClient,
@@ -510,3 +516,6 @@ def is_ready_for_review(client: ClaudeCodeClient, context: str, max_retries: int
             raise InvalidReviewReadinessResponse(
                 f"Invalid response after {max_retries + 1} attempts: {response}"
             )
+
+    # Unreachable: loop always returns or raises
+    raise InvalidReviewReadinessResponse("Unexpected exit from readiness loop")
