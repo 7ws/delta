@@ -206,8 +206,14 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 5.2 Issue Titles
 
-- 5.2.1: Format issue titles as `<Verb> <object> [<condition>]`. Issues represent goals.
-- 5.2.2: Examples: "Create new endpoint `/api/v1/environments/:key/delete-segment-override/`", "Read UI identities from replica database", "Filter feature states by segment".
+- 5.2.1: When the issue represents a goal, format its title as `<Verb> <object> [<condition>]`. Examples:
+  - "Create new endpoint `/api/v1/environments/:key/delete-segment-override/`"
+  - "Read UI identities from replica database"
+  - "Filter feature states by segment"
+- 5.2.2: When the issue represents a problem, format its title using the problem description in passive voice as `<Object> <predicate> [<condition>]`. Examples:
+  - "The modal window is not closing when the Close button is clicked"
+  - "Identity is not immediately updated in UI after editing"
+  - "Segment filter includes unexpected results"
 
 ## 5.3 Pull Request Titles
 
