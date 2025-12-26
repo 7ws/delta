@@ -115,6 +115,49 @@ class ComplianceReport:
         return "\n".join(lines)
 
 
+SIMPLE_PLAN_REVIEW_PROMPT = """\
+You are a compliance reviewer performing a quick sanity check on a SIMPLE task plan.
+
+Simple tasks are well-understood operations: git rewrites, file renames, config changes,
+standard git operations, running commands. They do not require full guideline evaluation.
+
+## User Request
+
+{user_prompt}
+
+## Proposed Plan
+
+{plan}
+
+## Quick Check
+
+Verify these essentials only:
+1. Does the plan address what the user asked for?
+2. Are there obvious safety concerns (data loss, security issues)?
+3. Is the approach reasonable for this type of task?
+
+Do NOT evaluate:
+- Every guideline in AGENTS.md
+- Minor stylistic concerns
+- Hypothetical edge cases
+- Documentation requirements for simple operations
+
+## Required Output Format
+
+```json
+{{
+  "approved": true,
+  "reason": "Brief explanation (1-2 sentences)"
+}}
+```
+
+Set approved=false only if the plan:
+- Does not address the user's request
+- Has obvious safety concerns
+- Uses a clearly wrong approach
+"""
+
+
 LIGHTWEIGHT_REVIEW_PROMPT = """\
 You are a compliance reviewer performing a quick check on a READ-ONLY operation.
 
@@ -546,6 +589,69 @@ def build_section_compliance_prompt(
         tool_history=history_text,
         proposed_action=proposed_action,
     )
+
+
+def build_simple_plan_review_prompt(
+    user_prompt: str,
+    plan: str,
+) -> str:
+    """Build prompt for simple plan review (lightweight validation).
+
+    Args:
+        user_prompt: The user's request.
+        plan: The proposed implementation plan.
+
+    Returns:
+        Formatted prompt for quick sanity check.
+    """
+    return SIMPLE_PLAN_REVIEW_PROMPT.format(
+        user_prompt=user_prompt,
+        plan=plan,
+    )
+
+
+def parse_simple_plan_response(response: str) -> ComplianceReport:
+    """Parse simple plan review response.
+
+    Args:
+        response: Raw response from the simple plan reviewer.
+
+    Returns:
+        ComplianceReport with approved/rejected status.
+    """
+    import json
+    import re
+
+    json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
+    if json_match:
+        json_str = json_match.group(1)
+    else:
+        json_start = response.find("{")
+        json_end = response.rfind("}") + 1
+        if json_start >= 0 and json_end > json_start:
+            json_str = response[json_start:json_end]
+        else:
+            raise ValueError("No JSON found in simple plan review response")
+
+    data = json.loads(json_str)
+
+    report = ComplianceReport(proposed_action=data.get("reason", "Simple task"))
+
+    # Create a single section for the simple review
+    is_approved = data.get("approved", False)
+
+    section = SectionScore(section_number=0, section_name="Simple Review")
+    section.guideline_scores.append(
+        GuidelineScore(
+            guideline_id="simple",
+            guideline_text="Simple task sanity check",
+            score=Score.FULL if is_approved else Score.NONE,
+            justification=data.get("reason", ""),
+        )
+    )
+    report.section_scores.append(section)
+
+    return report
 
 
 def build_lightweight_prompt(

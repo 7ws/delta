@@ -79,7 +79,9 @@ from delta.compliance import (
     ComplianceReport,
     build_batch_work_review_prompt,
     build_plan_review_prompt,
+    build_simple_plan_review_prompt,
     parse_compliance_response,
+    parse_simple_plan_response,
 )
 from delta.guidelines import (
     AgentsDocument,
@@ -89,9 +91,11 @@ from delta.guidelines import (
 )
 from delta.llm import (
     ClaudeCodeClient,
+    InvalidComplexityResponse,
     InvalidPlanParseResponse,
     InvalidReviewReadinessResponse,
     InvalidTriageResponse,
+    classify_task_complexity,
     detect_task_progress,
     generate_clarifying_questions,
     get_classify_client,
@@ -421,6 +425,65 @@ class DeltaAgent(Agent):
                         f"No AGENTS.md in target codebase, using bundled: {self.agents_md_path}"
                     )
         self.agents_doc = parse_agents_md(self.agents_md_path)
+
+    async def _review_simple_plan(
+        self,
+        state: ComplianceState,
+        plan: str,
+        session_id: str,
+    ) -> ComplianceReport:
+        """Review a simple plan with lightweight validation.
+
+        Simple tasks bypass full guideline evaluation and receive only a sanity
+        check for obvious issues.
+
+        Args:
+            state: Compliance state for the session.
+            plan: The proposed implementation plan.
+            session_id: ACP session identifier.
+
+        Returns:
+            ComplianceReport with approved/rejected status.
+        """
+        prompt = build_simple_plan_review_prompt(
+            state.current_user_prompt,
+            plan,
+        )
+
+        max_parse_retries = 3
+        last_error: Exception | None = None
+
+        for parse_attempt in range(max_parse_retries):
+            response = await asyncio.to_thread(
+                self.llm_client.complete,
+                prompt=prompt,
+                system="You are a quick sanity checker. Output only valid JSON.",
+            )
+
+            try:
+                report = parse_simple_plan_response(response)
+                state.plan_review_attempts += 1
+
+                logger.info(
+                    f"Simple plan review attempt {state.plan_review_attempts}: "
+                    f"compliant={report.is_compliant}"
+                )
+
+                return report
+            except (ValueError, KeyError) as e:
+                last_error = e
+                logger.warning(
+                    f"JSON parse error on attempt {parse_attempt + 1}/{max_parse_retries}: {e}"
+                )
+                prompt = (
+                    f"Your previous response had invalid JSON. "
+                    f"You MUST output valid JSON only.\n\n{prompt}"
+                )
+
+        raise RuntimeError(
+            f"Failed to parse simple plan response after {max_parse_retries} attempts: "
+            f"{last_error}"
+        )
 
     async def _review_plan(
         self,
@@ -1187,6 +1250,19 @@ class DeltaAgent(Agent):
                     await self._call_inner_agent(state, prompt_text, session_id)
                 return PromptResponse(stop_reason="end_turn")
 
+            # === COMPLEXITY CLASSIFICATION ===
+            try:
+                task_complexity = await asyncio.to_thread(
+                    classify_task_complexity,
+                    classify_client,
+                    prompt_text,
+                )
+            except InvalidComplexityResponse:
+                # Default to MODERATE if classification fails
+                task_complexity = "MODERATE"
+
+            logger.info(f"Task complexity: {task_complexity}")
+
             # === PHASE 1: PLANNING ===
             logger.info("Phase 1: Planning")
             state.phase = WorkflowPhase.PLANNING
@@ -1229,150 +1305,194 @@ RULES:
                     state, plan_prompt, session_id
                 )
 
-            # Review plan (target: pass in 3, max: 5 attempts)
-            while state.plan_review_attempts < state.max_plan_attempts:
-                attempt = state.plan_review_attempts + 1
-                max_attempts = state.max_plan_attempts
-                remaining = max_attempts - attempt
-
-                # Create a review block for this attempt
-                review_block_id = f"plan_review_{attempt}_{uuid4().hex[:8]}"
+            # Review plan based on complexity
+            # SIMPLE tasks get lightweight review (single attempt, sanity check only)
+            # MODERATE/COMPLEX tasks get full review (up to 5 attempts, all guidelines)
+            if task_complexity == "SIMPLE":
+                # Lightweight review for simple tasks
+                review_block_id = f"plan_review_simple_{uuid4().hex[:8]}"
                 review_block = start_tool_call(
                     tool_call_id=review_block_id,
-                    title=f"Reviewing plan (attempt {attempt}/{max_attempts})",
+                    title="Quick sanity check (simple task)",
                     kind="think",
                     status="in_progress",
                 )
                 await self._conn.session_update(session_id=session_id, update=review_block)
 
-                report = await self._review_plan(state, plan_response, session_id)
+                report = await self._review_simple_plan(state, plan_response, session_id)
 
                 if report.is_compliant:
                     state.approved_plan = plan_response
 
-                    # Update review block to completed
                     review_update = update_tool_call(
                         tool_call_id=review_block_id,
-                        title=f"Plan review {attempt}/{max_attempts}: Approved",
+                        title="Simple task approved",
                         status="completed",
                     )
                     await self._conn.session_update(session_id=session_id, update=review_update)
 
-                    # Parse plan into tasks and send plan widget
                     await self._parse_and_send_plan(state, plan_response, session_id)
 
-                    # Show the approved plan
-                    plan_msg = f"\n\n**Approved Plan:**\n\n{plan_response}\n"
+                    plan_msg = f"\n\n**Approved Plan (simple task):**\n\n{plan_response}\n"
                     chunk = update_agent_message(text_block(plan_msg))
                     await self._conn.session_update(session_id=session_id, update=chunk)
-                    break
-
-                # Build violation details for display
-                violation_lines = []
-                for section in report.failing_sections:
-                    for g in section.guideline_scores:
-                        if not g.score.is_passing:
-                            violation_lines.append(
-                                f"  - {g.guideline_id} ({g.score}): {g.justification}"
-                            )
-
-                violations_text = "\n".join(violation_lines) if violation_lines else "  (none)"
-
-                if state.plan_review_attempts >= state.max_plan_attempts:
-                    # Final attempt failed - update block with violations
+                else:
+                    # Simple task rejected - upgrade to full review
+                    logger.info("Simple task rejected, upgrading to full review")
                     review_update = update_tool_call(
                         tool_call_id=review_block_id,
-                        title=f"Plan review {attempt}/{max_attempts}: Failed",
+                        title="Simple check failed, full review required",
+                        status="failed",
+                    )
+                    await self._conn.session_update(session_id=session_id, update=review_update)
+                    task_complexity = "MODERATE"  # Fall through to full review
+
+            # Full review for MODERATE/COMPLEX tasks (or upgraded SIMPLE tasks)
+            if task_complexity != "SIMPLE" and not state.approved_plan:
+                while state.plan_review_attempts < state.max_plan_attempts:
+                    attempt = state.plan_review_attempts + 1
+                    max_attempts = state.max_plan_attempts
+                    remaining = max_attempts - attempt
+
+                    # Create a review block for this attempt
+                    review_block_id = f"plan_review_{attempt}_{uuid4().hex[:8]}"
+                    review_block = start_tool_call(
+                        tool_call_id=review_block_id,
+                        title=f"Reviewing plan (attempt {attempt}/{max_attempts})",
+                        kind="think",
+                        status="in_progress",
+                    )
+                    await self._conn.session_update(session_id=session_id, update=review_block)
+
+                    report = await self._review_plan(state, plan_response, session_id)
+
+                    if report.is_compliant:
+                        state.approved_plan = plan_response
+
+                        # Update review block to completed
+                        review_update = update_tool_call(
+                            tool_call_id=review_block_id,
+                            title=f"Plan review {attempt}/{max_attempts}: Approved",
+                            status="completed",
+                        )
+                        await self._conn.session_update(session_id=session_id, update=review_update)
+
+                        # Parse plan into tasks and send plan widget
+                        await self._parse_and_send_plan(state, plan_response, session_id)
+
+                        # Show the approved plan
+                        plan_msg = f"\n\n**Approved Plan:**\n\n{plan_response}\n"
+                        chunk = update_agent_message(text_block(plan_msg))
+                        await self._conn.session_update(session_id=session_id, update=chunk)
+                        break
+
+                    # Build violation details for display
+                    violation_lines = []
+                    for section in report.failing_sections:
+                        for g in section.guideline_scores:
+                            if not g.score.is_passing:
+                                violation_lines.append(
+                                    f"  - {g.guideline_id} ({g.score}): {g.justification}"
+                                )
+
+                    violations_text = "\n".join(violation_lines) if violation_lines else "  (none)"
+
+                    if state.plan_review_attempts >= state.max_plan_attempts:
+                        # Final attempt failed - update block with violations
+                        review_update = update_tool_call(
+                            tool_call_id=review_block_id,
+                            title=f"Plan review {attempt}/{max_attempts}: Failed",
+                            status="failed",
+                        )
+                        await self._conn.session_update(session_id=session_id, update=review_update)
+
+                        # Show violations in a message
+                        violations_msg = (
+                            f"\n\n**Violations (attempt {attempt}):**\n{violations_text}\n"
+                        )
+                        chunk = update_agent_message(text_block(violations_msg))
+                        await self._conn.session_update(session_id=session_id, update=chunk)
+
+                        # Build list of failing guidelines for escalation
+                        failing_guidelines = []
+                        for section in report.failing_sections:
+                            for g in section.guideline_scores:
+                                if not g.score.is_passing:
+                                    failing_guidelines.append(
+                                        f"- **{g.guideline_id}**: {g.justification}"
+                                    )
+
+                        # Generate context-specific questions using Haiku
+                        violations_for_questions = [
+                            f"{g.guideline_id}: {g.justification}"
+                            for section in report.failing_sections
+                            for g in section.guideline_scores
+                            if not g.score.is_passing
+                        ]
+                        questions = await asyncio.to_thread(
+                            generate_clarifying_questions,
+                            classify_client,
+                            prompt_text,
+                            violations_for_questions,
+                        )
+
+                        # Format numbered questions
+                        numbered_questions = "\n".join(
+                            f"{i + 1}. {q}" for i, q in enumerate(questions)
+                        )
+
+                        # Escalate to user with specific questions
+                        escalate_msg = (
+                            f"\n\n**I need clarification to proceed.**\n\n"
+                            f"After {max_attempts} attempts, "
+                            f"I could not create a compliant plan.\n\n"
+                            f"**Unresolved issues:**\n"
+                            + "\n".join(failing_guidelines)
+                            + f"\n\n**Questions:**\n{numbered_questions}\n"
+                        )
+                        chunk = update_agent_message(text_block(escalate_msg))
+                        await self._conn.session_update(session_id=session_id, update=chunk)
+                        return PromptResponse(stop_reason="end_turn")
+
+                    # Build revision strategy text
+                    revision_strategy = report.revision_guidance or "Address all violations listed."
+
+                    # Update review block with violations and revision strategy
+                    review_update = update_tool_call(
+                        tool_call_id=review_block_id,
+                        title=f"Plan review {attempt}/{max_attempts}: Revising",
                         status="failed",
                     )
                     await self._conn.session_update(session_id=session_id, update=review_update)
 
-                    # Show violations in a message
-                    violations_msg = (
-                        f"\n\n**Violations (attempt {attempt}):**\n{violations_text}\n"
+                    # Show violations and revision strategy in a message
+                    attempt_summary = (
+                        f"\n\n**Plan Review (attempt {attempt}/{max_attempts})**\n\n"
+                        f"**Violations:**\n{violations_text}\n\n"
+                        f"**Revision Strategy:**\n{revision_strategy}\n"
                     )
-                    chunk = update_agent_message(text_block(violations_msg))
+                    chunk = update_agent_message(text_block(attempt_summary))
                     await self._conn.session_update(session_id=session_id, update=chunk)
 
-                    # Build list of failing guidelines for escalation
-                    failing_guidelines = []
+                    # Build clear violation feedback for the agent
+                    violations = []
                     for section in report.failing_sections:
                         for g in section.guideline_scores:
                             if not g.score.is_passing:
-                                failing_guidelines.append(
-                                    f"- **{g.guideline_id}**: {g.justification}"
+                                violations.append(
+                                    f"- {g.guideline_id} ({g.score}): {g.justification}"
                                 )
 
-                    # Generate context-specific questions using Haiku
-                    violations_for_questions = [
-                        f"{g.guideline_id}: {g.justification}"
-                        for section in report.failing_sections
-                        for g in section.guideline_scores
-                        if not g.score.is_passing
-                    ]
-                    questions = await asyncio.to_thread(
-                        generate_clarifying_questions,
-                        classify_client,
-                        prompt_text,
-                        violations_for_questions,
-                    )
+                    urgency = ""
+                    if remaining <= 2:
+                        urgency = (
+                            f"\n\n⚠️ URGENT: You have {remaining} attempt(s) remaining. "
+                            f"Address ALL violations below or provide numbered questions "
+                            f"if you need clarification from the user."
+                        )
 
-                    # Format numbered questions
-                    numbered_questions = "\n".join(
-                        f"{i + 1}. {q}" for i, q in enumerate(questions)
-                    )
-
-                    # Escalate to user with specific questions
-                    escalate_msg = (
-                        f"\n\n**I need clarification to proceed.**\n\n"
-                        f"After {max_attempts} attempts, I could not create a compliant plan.\n\n"
-                        f"**Unresolved issues:**\n"
-                        + "\n".join(failing_guidelines)
-                        + f"\n\n**Questions:**\n{numbered_questions}\n"
-                    )
-                    chunk = update_agent_message(text_block(escalate_msg))
-                    await self._conn.session_update(session_id=session_id, update=chunk)
-                    return PromptResponse(stop_reason="end_turn")
-
-                # Build revision strategy text
-                revision_strategy = report.revision_guidance or "Address all violations listed."
-
-                # Update review block with violations and revision strategy
-                review_update = update_tool_call(
-                    tool_call_id=review_block_id,
-                    title=f"Plan review {attempt}/{max_attempts}: Revising",
-                    status="failed",
-                )
-                await self._conn.session_update(session_id=session_id, update=review_update)
-
-                # Show violations and revision strategy in a message
-                attempt_summary = (
-                    f"\n\n**Plan Review (attempt {attempt}/{max_attempts})**\n\n"
-                    f"**Violations:**\n{violations_text}\n\n"
-                    f"**Revision Strategy:**\n{revision_strategy}\n"
-                )
-                chunk = update_agent_message(text_block(attempt_summary))
-                await self._conn.session_update(session_id=session_id, update=chunk)
-
-                # Build clear violation feedback for the agent
-                violations = []
-                for section in report.failing_sections:
-                    for g in section.guideline_scores:
-                        if not g.score.is_passing:
-                            violations.append(
-                                f"- {g.guideline_id} ({g.score}): {g.justification}"
-                            )
-
-                urgency = ""
-                if remaining <= 2:
-                    urgency = (
-                        f"\n\n⚠️ URGENT: You have {remaining} attempt(s) remaining. "
-                        f"Address ALL violations below or provide numbered questions "
-                        f"if you need clarification from the user."
-                    )
-
-                # Request revised plan with clear feedback
-                revise_prompt = f"""\
+                    # Request revised plan with clear feedback
+                    revise_prompt = f"""\
 Your plan FAILED compliance review. You MUST fix these violations:{urgency}
 
 VIOLATIONS:
@@ -1390,9 +1510,9 @@ ORIGINAL REQUEST:
 
 Provide your revised YAML plan now:
 """
-                plan_response = await self._call_inner_agent_silent(
-                    state, revise_prompt, session_id
-                )
+                    plan_response = await self._call_inner_agent_silent(
+                        state, revise_prompt, session_id
+                    )
 
             # === PHASE 2: EXECUTION ===
             logger.info("Phase 2: Execution")
