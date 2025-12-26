@@ -133,6 +133,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 3.2.2: Stage files and directories explicitly by name using `git add <file>` or `git add <directory>`.
 - 3.2.3: Do not use `git add -A` or `git add .`.
 - 3.2.4: When a modified file contains unrelated changes, stage only relevant hunks using `printf 'y\nn\nq\n' | git add -p <file>`.
+- 3.2.5: Do not commit unrelated changes. If the diff contains changes outside the scope of the current task, unstage them or stage only relevant hunks. This rule has no exceptions.
 
 ## 3.3 Pre-Commit Verification
 
@@ -141,6 +142,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 3.3.3: Run linters before every commit. Execute `make lint` or equivalent.
 - 3.3.4: Do not proceed with failing tests or linter errors.
 - 3.3.5: After each commit, verify atomicity by checking out that specific commit and running tests in isolation.
+- 3.3.6: Work is incomplete until committed. Do not declare work complete or ready for review without creating a commit.
 
 
 ---
