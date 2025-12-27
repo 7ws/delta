@@ -100,6 +100,7 @@ from delta.llm import (
     generate_clarifying_questions,
     get_classify_client,
     get_llm_client,
+    interpret_for_user,
     is_ready_for_review,
     parse_plan_tasks,
     triage_user_message,
@@ -1044,6 +1045,7 @@ class DeltaAgent(Agent):
 
         response_text = ""
         tool_calls: dict[str, str] = {}  # tool_use_id -> tool_call_id for UI
+        interpret_client = get_classify_client(self.classify_model)
 
         async for message in client.receive_response():
             if isinstance(message, AssistantMessage):
@@ -1060,8 +1062,17 @@ class DeltaAgent(Agent):
                         if needs_separator:
                             text = "\n\n" + text
                         response_text += text
-                        chunk = update_agent_message(text_block(text))
-                        await self._conn.session_update(session_id=session_id, update=chunk)
+
+                        # Interpret text for user display
+                        interpreted = await asyncio.to_thread(
+                            interpret_for_user,
+                            interpret_client,
+                            text,
+                            state.phase.value,
+                        )
+                        if interpreted:
+                            chunk = update_agent_message(text_block(interpreted))
+                            await self._conn.session_update(session_id=session_id, update=chunk)
 
                     elif isinstance(block, ToolUseBlock):
                         # Tool calls are displayed by handle_tool_permission

@@ -8,6 +8,7 @@ from delta.llm import (
     ClaudeCodeClient,
     InvalidComplexityResponse,
     classify_task_complexity,
+    interpret_for_user,
 )
 
 
@@ -99,3 +100,51 @@ class TestClassifyTaskComplexity:
         # Then
         assert "Invalid response" in str(error)
         assert "FOO" in str(error)
+
+
+class TestInterpretForUser:
+    """Tests for inner agent output interpretation."""
+
+    def test_given_suppress_response_when_interpreted_then_returns_none(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.return_value = "SUPPRESS"
+
+        # When
+        result = interpret_for_user(client, "The user chose to skip", "executing")
+
+        # Then
+        assert result is None
+
+    def test_given_useful_text_when_interpreted_then_returns_rewritten(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.return_value = "Creating the mobile layout component..."
+
+        # When
+        result = interpret_for_user(client, "I am creating the component", "executing")
+
+        # Then
+        assert result == "Creating the mobile layout component..."
+
+    def test_given_empty_response_when_interpreted_then_returns_none(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.return_value = ""
+
+        # When
+        result = interpret_for_user(client, "Some text", "planning")
+
+        # Then
+        assert result is None
+
+    def test_given_whitespace_response_when_interpreted_then_returns_none(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.return_value = "   \n  "
+
+        # When
+        result = interpret_for_user(client, "Some text", "reviewing")
+
+        # Then
+        assert result is None

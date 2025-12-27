@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from textwrap import dedent
 
 
 class ClaudeCodeClient:
@@ -620,3 +621,59 @@ def is_ready_for_review(client: ClaudeCodeClient, context: str, max_retries: int
 
     # Unreachable: loop always returns or raises
     raise InvalidReviewReadinessResponse("Unexpected exit from readiness loop")
+
+
+def interpret_for_user(
+    client: ClaudeCodeClient,
+    inner_agent_text: str,
+    workflow_phase: str,
+) -> str | None:
+    """Interpret inner agent output into user-appropriate status updates.
+
+    Transforms inter-agent communication into meaningful updates for the actual user.
+    Returns None if the text contains no user-relevant information.
+
+    Args:
+        client: Claude Code client for interpretation.
+        inner_agent_text: Raw text from the inner agent.
+        workflow_phase: Current phase (planning, executing, reviewing).
+
+    Returns:
+        User-appropriate status text, or None if text should be suppressed.
+    """
+    prompt = dedent(f"""\
+---
+context:
+  architecture: |
+    Delta is a multi-agent system:
+    - Outer Agent: orchestrates workflow, requests plans, triggers reviews
+    - Inner Agent: does the actual coding work
+    - Review Agent: scores compliance with guidelines
+  problem: |
+    The Inner Agent believes it talks to "the user" but actually talks to
+    the Outer Agent. References to "the user chose" or "user acknowledged"
+    are AGENT-TO-AGENT communication, not the actual human.
+  current_phase: {workflow_phase}
+  task: Filter inner agent output for display to the ACTUAL human user
+---
+
+INNER AGENT TEXT:
+{inner_agent_text}
+
+---
+rules:
+  - Useful progress (actions, results, code): output cleaned for human
+  - Inter-agent chatter (compliance scores, "§X.X.X", "the user" choices): SUPPRESS
+  - Keep code blocks, file paths, technical content intact
+  - Be concise
+---
+
+OUTPUT (cleaned text for human, or exactly "SUPPRESS"):\
+    """)
+
+    response = client.complete(prompt).strip()
+
+    if response == "SUPPRESS" or not response:
+        return None
+
+    return response
