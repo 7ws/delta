@@ -150,25 +150,18 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 # 4. Commit Messages
 
-## 4.1 Title Format
+## 4.1 Title
 
 - 4.1.1: Format titles as `<Verb> <object>` in imperative mood.
 - 4.1.2: Do not use prefixes, types, or scopes in commit titles.
-- 4.1.3: Describe the outcome (why or what capability), not the process (how).
-- 4.1.4: Do not use process verbs such as "Convert", "Migrate", "Refactor", or "Reorganise". Use outcome verbs such as "Use", "Support", "Enable", "Fix", "Add", "Remove", or "Prevent".
-- 4.1.5: The title must describe the user-facing outcome or problem solved. Ask "What problem does this solve?" not "What did I change?"
-
-## 4.2 Title Content
-
-- 4.2.1: The title represents the commit's sellable goal.
-- 4.2.2: Limit each commit to one goal.
-- 4.2.3: Write "Use UUID primary keys for all models" instead of "Add UUID field to BaseModel and regenerate migrations".
-
-## 4.3 Body Format
-
-- 4.3.1: The body contains only the title, a blank line, and the co-author line.
-- 4.3.2: Always add: `Co-authored-by: Claude <noreply@anthropic.com>`
-- 4.3.3: Do not add descriptions, bullet points, or implementation details.
+- 4.1.3: The body contains only the title, a blank line, and a short story of the change in bulleted format.
+- 4.1.4: Describe the outcome (why or what capability), not the process (how).
+    - Good example: "Use UUID primary keys for all models"
+    - Bad example: "Add UUID field to BaseModel and regenerate migrations"
+- 4.1.5: Do not use process verbs such as "Convert", "Migrate", "Refactor", or "Reorganise". Use outcome verbs such as "Use", "Support", "Enable", "Fix", "Add", "Remove", or "Prevent".
+- 4.1.6: The title must describe the user-facing outcome or problem solved. Ask "What problem does this solve?" not "What did I change?"
+- 4.1.7: The title represents the commit's sellable goal.
+- 4.1.8: Limit each commit to one goal.
 
 ## 4.4 Atomicity
 
