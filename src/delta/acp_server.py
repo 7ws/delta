@@ -100,7 +100,6 @@ from delta.llm import (
     generate_clarifying_questions,
     get_classify_client,
     get_llm_client,
-    interpret_for_user,
     is_ready_for_review,
     parse_plan_tasks,
     triage_user_message,
@@ -322,10 +321,17 @@ class ComplianceState:
     user_request_history: list[str] = field(default_factory=list)
     tool_call_history: list[str] = field(default_factory=list)
 
+    # Context tracking for logging
+    current_action: str = ""  # What the agent is currently doing
+
     def record_tool_call(self, tool_description: str, allowed: bool) -> None:
         """Record a tool call in the session history."""
         status = "ALLOWED" if allowed else "DENIED"
         self.tool_call_history.append(f"[{status}] {tool_description}")
+
+    def set_current_action(self, action: str) -> None:
+        """Set the current action being performed (for logging)."""
+        self.current_action = action
 
     def reset_for_new_prompt(self) -> None:
         """Reset state for a new user prompt.
@@ -338,6 +344,7 @@ class ComplianceState:
         self.work_summary = ""
         self.plan_review_attempts = 0
         self.plan_tasks = []
+        self.current_action = ""
 
 
 class DeltaAgent(Agent):
@@ -351,7 +358,13 @@ class DeltaAgent(Agent):
         review_model: str | None = None,
         classify_model: str = "haiku",
     ) -> None:
-        """Initialize Delta agent."""
+        """Initialize Delta agent.
+
+        Args:
+            agents_md_path: Path to AGENTS.md file (auto-detected if not specified).
+            review_model: Model for compliance reviews.
+            classify_model: Model for action classification (default: haiku).
+        """
         self.sessions: dict[str, ComplianceState] = {}
         self.llm_client: ClaudeCodeClient = get_llm_client(model=review_model)
         self.classify_model = classify_model
@@ -747,7 +760,7 @@ class DeltaAgent(Agent):
             logger.warning(f"Failed to detect task progress: {e}")
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt that includes AGENTS.md."""
+        """Build system prompt that includes AGENTS.md and user communication guidelines."""
         self._load_agents_md()
 
         if self.agents_doc is None:
@@ -759,6 +772,16 @@ class DeltaAgent(Agent):
             "When a change affects multiple files, update ALL affected files without "
             "asking for permission. Do NOT stop after one file and ask 'Do you want me "
             "to update the others?' - finish the job. Incomplete work is a violation.\n\n"
+            "USER COMMUNICATION GUIDELINES:\n"
+            "You are talking directly to the user. Write as if you are the only agent.\n"
+            "- DO: Share progress naturally (\"Reading the file...\", \"Creating the component...\")\n"
+            "- DO: Explain what you're doing and why in user-friendly terms\n"
+            "- DO: Show code, file paths, and technical results\n"
+            "- DON'T: Mention compliance, reviews, guidelines, or AGENTS.md\n"
+            "- DON'T: Reference internal scores, attempts, or workflow phases\n"
+            "- DON'T: Say \"the user chose\" or \"the user acknowledged\" (you ARE talking to the user)\n"
+            "- DON'T: Mention section references like §X.X.X\n"
+            "Keep your output clean and conversational.\n\n"
             f"AGENTS.md content:\n\n{self.agents_doc.raw_content}"
         )
 
@@ -1020,7 +1043,10 @@ class DeltaAgent(Agent):
         prompt: str | list[dict[str, Any]],
         session_id: str,
     ) -> str:
-        """Call the inner agent and return its response.
+        """Call the inner agent and stream its response to the user.
+
+        The inner agent is instructed via system prompt to only emit user-relevant
+        content, so we stream directly without filtering.
 
         Args:
             state: Compliance state for the session.
@@ -1044,8 +1070,6 @@ class DeltaAgent(Agent):
             await client.query(message_stream())
 
         response_text = ""
-        tool_calls: dict[str, str] = {}  # tool_use_id -> tool_call_id for UI
-        interpret_client = get_classify_client(self.classify_model)
 
         async for message in client.receive_response():
             if isinstance(message, AssistantMessage):
@@ -1063,21 +1087,10 @@ class DeltaAgent(Agent):
                             text = "\n\n" + text
                         response_text += text
 
-                        # Interpret text for user display
-                        interpreted = await asyncio.to_thread(
-                            interpret_for_user,
-                            interpret_client,
-                            text,
-                            state.phase.value,
-                        )
-                        if interpreted:
-                            chunk = update_agent_message(text_block(interpreted))
+                        # Stream directly to user (inner agent is instructed to emit clean output)
+                        if text.strip():
+                            chunk = update_agent_message(text_block(text))
                             await self._conn.session_update(session_id=session_id, update=chunk)
-
-                    elif isinstance(block, ToolUseBlock):
-                        # Tool calls are displayed by handle_tool_permission
-                        # Just track the ID for result handling
-                        tool_calls[block.id] = block.id
 
         return response_text
 
@@ -1320,11 +1333,12 @@ RULES:
             # SIMPLE tasks get lightweight review (single attempt, sanity check only)
             # MODERATE/COMPLEX tasks get full review (up to 5 attempts, all guidelines)
             if task_complexity == "SIMPLE":
-                # Lightweight review for simple tasks
+                # Lightweight review for simple tasks - show user-friendly progress
+                state.set_current_action("Preparing approach")
                 review_block_id = f"plan_review_simple_{uuid4().hex[:8]}"
                 review_block = start_tool_call(
                     tool_call_id=review_block_id,
-                    title="Quick sanity check (simple task)",
+                    title="Preparing...",
                     kind="think",
                     status="in_progress",
                 )
@@ -1337,67 +1351,86 @@ RULES:
 
                     review_update = update_tool_call(
                         tool_call_id=review_block_id,
-                        title="Simple task approved",
+                        title="Ready to proceed",
                         status="completed",
                     )
                     await self._conn.session_update(session_id=session_id, update=review_update)
 
                     await self._parse_and_send_plan(state, plan_response, session_id)
 
-                    plan_msg = f"\n\n**Approved Plan (simple task):**\n\n{plan_response}\n"
+                    # Show plan without internal terminology
+                    plan_msg = f"\n\n**Here's my plan:**\n\n{plan_response}\n"
                     chunk = update_agent_message(text_block(plan_msg))
                     await self._conn.session_update(session_id=session_id, update=chunk)
                 else:
-                    # Simple task rejected - upgrade to full review
+                    # Simple task rejected - upgrade to full review (silently)
                     logger.info("Simple task rejected, upgrading to full review")
                     review_update = update_tool_call(
                         tool_call_id=review_block_id,
-                        title="Simple check failed, full review required",
-                        status="failed",
+                        title="Refining approach...",
+                        status="in_progress",
                     )
                     await self._conn.session_update(session_id=session_id, update=review_update)
                     task_complexity = "MODERATE"  # Fall through to full review
 
             # Full review for MODERATE/COMPLEX tasks (or upgraded SIMPLE tasks)
             if task_complexity != "SIMPLE" and not state.approved_plan:
+                # Single progress indicator for the entire planning phase
+                planning_block_id = f"planning_{uuid4().hex[:8]}"
+                planning_block = start_tool_call(
+                    tool_call_id=planning_block_id,
+                    title="Thinking through the approach...",
+                    kind="think",
+                    status="in_progress",
+                )
+                await self._conn.session_update(session_id=session_id, update=planning_block)
+
                 while state.plan_review_attempts < state.max_plan_attempts:
                     attempt = state.plan_review_attempts + 1
                     max_attempts = state.max_plan_attempts
                     remaining = max_attempts - attempt
 
-                    # Create a review block for this attempt
-                    review_block_id = f"plan_review_{attempt}_{uuid4().hex[:8]}"
-                    review_block = start_tool_call(
-                        tool_call_id=review_block_id,
-                        title=f"Reviewing plan (attempt {attempt}/{max_attempts})",
-                        kind="think",
+                    # Update progress title based on attempt (user-friendly, no internal terminology)
+                    if attempt == 1:
+                        title = "Analyzing the request..."
+                    elif attempt == 2:
+                        title = "Refining the approach..."
+                    elif attempt == 3:
+                        title = "Working on a better solution..."
+                    else:
+                        title = "Almost there..."
+
+                    planning_update = update_tool_call(
+                        tool_call_id=planning_block_id,
+                        title=title,
                         status="in_progress",
                     )
-                    await self._conn.session_update(session_id=session_id, update=review_block)
+                    await self._conn.session_update(session_id=session_id, update=planning_update)
 
+                    state.set_current_action(f"Planning (iteration {attempt})")
                     report = await self._review_plan(state, plan_response, session_id)
 
                     if report.is_compliant:
                         state.approved_plan = plan_response
 
-                        # Update review block to completed
-                        review_update = update_tool_call(
-                            tool_call_id=review_block_id,
-                            title=f"Plan review {attempt}/{max_attempts}: Approved",
+                        # Update to completed with friendly message
+                        planning_update = update_tool_call(
+                            tool_call_id=planning_block_id,
+                            title="Ready to implement",
                             status="completed",
                         )
-                        await self._conn.session_update(session_id=session_id, update=review_update)
+                        await self._conn.session_update(session_id=session_id, update=planning_update)
 
                         # Parse plan into tasks and send plan widget
                         await self._parse_and_send_plan(state, plan_response, session_id)
 
-                        # Show the approved plan
-                        plan_msg = f"\n\n**Approved Plan:**\n\n{plan_response}\n"
+                        # Show the plan with friendly header
+                        plan_msg = f"\n\n**Here's my plan:**\n\n{plan_response}\n"
                         chunk = update_agent_message(text_block(plan_msg))
                         await self._conn.session_update(session_id=session_id, update=chunk)
                         break
 
-                    # Build violation details for display
+                    # Build violation details (for logging only, not shown to user)
                     violation_lines = []
                     for section in report.failing_sections:
                         for g in section.guideline_scores:
@@ -1405,33 +1438,16 @@ RULES:
                                 violation_lines.append(
                                     f"  - {g.guideline_id} ({g.score}): {g.justification}"
                                 )
-
-                    violations_text = "\n".join(violation_lines) if violation_lines else "  (none)"
+                    logger.debug(f"Plan violations: {violation_lines}")
 
                     if state.plan_review_attempts >= state.max_plan_attempts:
-                        # Final attempt failed - update block with violations
-                        review_update = update_tool_call(
-                            tool_call_id=review_block_id,
-                            title=f"Plan review {attempt}/{max_attempts}: Failed",
+                        # Final attempt failed - show user-friendly clarification request
+                        planning_update = update_tool_call(
+                            tool_call_id=planning_block_id,
+                            title="Need more information",
                             status="failed",
                         )
-                        await self._conn.session_update(session_id=session_id, update=review_update)
-
-                        # Show violations in a message
-                        violations_msg = (
-                            f"\n\n**Violations (attempt {attempt}):**\n{violations_text}\n"
-                        )
-                        chunk = update_agent_message(text_block(violations_msg))
-                        await self._conn.session_update(session_id=session_id, update=chunk)
-
-                        # Build list of failing guidelines for escalation
-                        failing_guidelines = []
-                        for section in report.failing_sections:
-                            for g in section.guideline_scores:
-                                if not g.score.is_passing:
-                                    failing_guidelines.append(
-                                        f"- **{g.guideline_id}**: {g.justification}"
-                                    )
+                        await self._conn.session_update(session_id=session_id, update=planning_update)
 
                         # Generate context-specific questions using Haiku
                         violations_for_questions = [
@@ -1452,38 +1468,18 @@ RULES:
                             f"{i + 1}. {q}" for i, q in enumerate(questions)
                         )
 
-                        # Escalate to user with specific questions
+                        # User-friendly escalation message (no internal terminology)
                         escalate_msg = (
-                            f"\n\n**I need clarification to proceed.**\n\n"
-                            f"After {max_attempts} attempts, "
-                            f"I could not create a compliant plan.\n\n"
-                            f"**Unresolved issues:**\n"
-                            + "\n".join(failing_guidelines)
-                            + f"\n\n**Questions:**\n{numbered_questions}\n"
+                            f"\n\n**I need a bit more information to help you with this.**\n\n"
+                            f"{numbered_questions}\n"
                         )
                         chunk = update_agent_message(text_block(escalate_msg))
                         await self._conn.session_update(session_id=session_id, update=chunk)
                         return PromptResponse(stop_reason="end_turn")
 
-                    # Build revision strategy text
+                    # Build revision strategy (internal only)
                     revision_strategy = report.revision_guidance or "Address all violations listed."
-
-                    # Update review block with violations and revision strategy
-                    review_update = update_tool_call(
-                        tool_call_id=review_block_id,
-                        title=f"Plan review {attempt}/{max_attempts}: Revising",
-                        status="failed",
-                    )
-                    await self._conn.session_update(session_id=session_id, update=review_update)
-
-                    # Show violations and revision strategy in a message
-                    attempt_summary = (
-                        f"\n\n**Plan Review (attempt {attempt}/{max_attempts})**\n\n"
-                        f"**Violations:**\n{violations_text}\n\n"
-                        f"**Revision Strategy:**\n{revision_strategy}\n"
-                    )
-                    chunk = update_agent_message(text_block(attempt_summary))
-                    await self._conn.session_update(session_id=session_id, update=chunk)
+                    logger.debug(f"Revision strategy: {revision_strategy}")
 
                     # Build clear violation feedback for the agent
                     violations = []
@@ -1528,6 +1524,7 @@ Provide your revised YAML plan now:
             # === PHASE 2: EXECUTION ===
             logger.info("Phase 2: Execution")
             state.phase = WorkflowPhase.EXECUTING
+            state.set_current_action("Implementing the plan")
 
             execute_prompt = (
                 f"Implement the approved plan. Proceed with the implementation now.\n\n"
@@ -1547,12 +1544,13 @@ Provide your revised YAML plan now:
                 if ready:
                     logger.info("Phase 3: Reviewing work")
                     state.phase = WorkflowPhase.REVIEWING
+                    state.set_current_action("Finalizing changes")
 
-                    # Show review block with spinner
-                    review_block_id = f"review_{uuid4().hex[:8]}"
+                    # Show user-friendly progress (hide "review" terminology)
+                    review_block_id = f"finalize_{uuid4().hex[:8]}"
                     review_block = start_tool_call(
                         tool_call_id=review_block_id,
-                        title="Reviewing completed work...",
+                        title="Finishing up...",
                         kind="think",
                         status="in_progress",
                     )
@@ -1570,10 +1568,10 @@ Provide your revised YAML plan now:
                             task.status = "completed"
                         await self._send_plan_update(state, session_id)
 
-                        # Update review block to completed
+                        # Update with friendly completion message
                         review_update = update_tool_call(
                             tool_call_id=review_block_id,
-                            title="Work approved",
+                            title="Done",
                             status="completed",
                         )
                         await self._conn.session_update(
@@ -1581,17 +1579,18 @@ Provide your revised YAML plan now:
                         )
                         break
 
-                    # Update review block to failed
+                    # Update with neutral message (hide review failure details from user)
                     review_update = update_tool_call(
                         tool_call_id=review_block_id,
-                        title="Work review failed - revising",
-                        status="failed",
+                        title="Making some adjustments...",
+                        status="in_progress",
                     )
                     await self._conn.session_update(
                         session_id=session_id, update=review_update
                     )
+                    logger.debug(f"Work review failed: {report.format()}")
 
-                    # Request revision from inner agent
+                    # Request revision from inner agent (internal, not shown to user)
                     revise_prompt = (
                         f"Your work failed compliance review. Please revise:\n\n"
                         f"{report.format()}\n\n"
@@ -1651,7 +1650,13 @@ async def run_server(
     review_model: str | None = None,
     classify_model: str = "haiku",
 ) -> None:
-    """Run the Delta ACP server."""
+    """Run the Delta ACP server.
+
+    Args:
+        agents_md_path: Path to AGENTS.md file (auto-detected if not specified).
+        review_model: Model for compliance reviews.
+        classify_model: Model for action classification (default: haiku).
+    """
     from acp import stdio_streams
 
     agent = DeltaAgent(

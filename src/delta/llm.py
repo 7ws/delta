@@ -627,48 +627,105 @@ def interpret_for_user(
     client: ClaudeCodeClient,
     inner_agent_text: str,
     workflow_phase: str,
+    context: str = "",
 ) -> str | None:
     """Interpret inner agent output into user-appropriate status updates.
 
     Transforms inter-agent communication into meaningful updates for the actual user.
     Returns None if the text contains no user-relevant information.
 
+    The interpretation layer ensures the user sees a clean, single-agent experience
+    by filtering out:
+    - Inter-agent communication (references to "the user chose", acknowledgments)
+    - Compliance scores and guideline references (§X.X.X notation)
+    - Internal workflow state (review attempts, phase transitions)
+    - Agent-to-agent instructions and feedback
+
     Args:
         client: Claude Code client for interpretation.
         inner_agent_text: Raw text from the inner agent.
         workflow_phase: Current phase (planning, executing, reviewing).
+        context: Optional additional context about what the agent is doing.
 
     Returns:
         User-appropriate status text, or None if text should be suppressed.
     """
+    # Quick pattern-based filtering for obvious inter-agent chatter
+    # This avoids LLM calls for clearly internal content
+    suppression_patterns = [
+        "§",  # Guideline references
+        "compliance score",
+        "compliance review",
+        "plan review",
+        "work review",
+        "the user chose",
+        "the user acknowledged",
+        "the user confirmed",
+        "user selected",
+        "agent-to-agent",
+        "inter-agent",
+        "review attempt",
+        "attempt failed",
+        "revision guidance",
+        "revision strategy",
+        "AGENTS.md",
+        "guideline",
+        "5/5",
+        "4/5",
+        "3/5",
+        "2/5",
+        "1/5",
+    ]
+
+    text_lower = inner_agent_text.lower()
+    for pattern in suppression_patterns:
+        if pattern.lower() in text_lower:
+            # Check if this is primarily inter-agent content
+            # If the pattern appears multiple times or is the main content, suppress
+            if text_lower.count(pattern.lower()) > 1 or len(inner_agent_text.strip()) < 200:
+                return None
+
+    # For longer content, use LLM to intelligently filter
+    context_section = f"\n  additional_context: {context}" if context else ""
+
     prompt = dedent(f"""\
 ---
 context:
+  goal: Present a seamless single-agent experience to the human user
   architecture: |
-    Delta is a multi-agent system:
-    - Outer Agent: orchestrates workflow, requests plans, triggers reviews
-    - Inner Agent: does the actual coding work
-    - Review Agent: scores compliance with guidelines
-  problem: |
-    The Inner Agent believes it talks to "the user" but actually talks to
-    the Outer Agent. References to "the user chose" or "user acknowledged"
-    are AGENT-TO-AGENT communication, not the actual human.
-  current_phase: {workflow_phase}
-  task: Filter inner agent output for display to the ACTUAL human user
+    This is a multi-agent system, but the user should feel they're talking to ONE agent.
+    - The user only sees the final, polished output
+    - Internal orchestration, reviews, and agent coordination are hidden
+  current_phase: {workflow_phase}{context_section}
 ---
 
-INNER AGENT TEXT:
+AGENT OUTPUT TO FILTER:
 {inner_agent_text}
 
 ---
-rules:
-  - Useful progress (actions, results, code): output cleaned for human
-  - Inter-agent chatter (compliance scores, "§X.X.X", "the user" choices): SUPPRESS
-  - Keep code blocks, file paths, technical content intact
-  - Be concise
+SUPPRESS these (output exactly "SUPPRESS"):
+  - Compliance scores, guideline references (§X.X.X), review results
+  - "The user chose/acknowledged/confirmed" (inter-agent communication)
+  - Review attempts, revision guidance, phase transitions
+  - Meta-commentary about the workflow or process
+  - Empty or redundant status updates
+  - Acknowledgments of internal instructions
+
+KEEP and CLEAN these (output the cleaned text):
+  - Actual progress: "Reading file X", "Creating function Y"
+  - Code blocks and technical content
+  - File paths, error messages, results
+  - Direct answers to user questions
+  - Explanations of what was done (not why compliance required it)
+
+OUTPUT FORMAT:
+- If content should be hidden from user: output exactly "SUPPRESS"
+- If content is useful: output the cleaned text, written as if speaking directly to the user
+- Be conversational and helpful, not robotic
+- Remove any references to internal processes
 ---
 
-OUTPUT (cleaned text for human, or exactly "SUPPRESS"):\
+OUTPUT:\
     """)
 
     response = client.complete(prompt).strip()
@@ -676,4 +733,20 @@ OUTPUT (cleaned text for human, or exactly "SUPPRESS"):\
     if response == "SUPPRESS" or not response:
         return None
 
-    return response
+    # Final cleanup: remove any remaining internal references that slipped through
+    cleanup_phrases = [
+        "As per the compliance",
+        "Following the guidelines",
+        "According to AGENTS.md",
+        "The review indicated",
+        "After compliance review",
+    ]
+
+    result = response
+    for phrase in cleanup_phrases:
+        if phrase in result:
+            # Remove the phrase and any following text until the next sentence
+            import re
+            result = re.sub(rf"{re.escape(phrase)}[^.]*\.\s*", "", result, flags=re.IGNORECASE)
+
+    return result.strip() if result.strip() else None
