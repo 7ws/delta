@@ -94,9 +94,11 @@ from delta.llm import (
     InvalidComplexityResponse,
     InvalidPlanParseResponse,
     InvalidReviewReadinessResponse,
+    InvalidTaskDuplicateResponse,
     InvalidTriageResponse,
     InvalidWriteClassificationResponse,
     classify_task_complexity,
+    classify_task_duplicate,
     classify_write_operation,
     detect_task_progress,
     generate_clarifying_questions,
@@ -342,13 +344,15 @@ class ComplianceState:
         """Reset state for a new user prompt.
 
         Resets workflow state while preserving tool call history
-        for compliance reviewer context.
+        for compliance reviewer context. Preserves incomplete tasks
+        to ensure follow-up prompts don't lose pending work.
         """
         self.phase = WorkflowPhase.PLANNING
         self.approved_plan = ""
         self.work_summary = ""
         self.plan_review_attempts = 0
-        self.plan_tasks = []
+        # Preserve incomplete tasks - only remove completed ones
+        self.plan_tasks = [t for t in self.plan_tasks if t.status != "completed"]
         self.current_action = ""
         self.has_write_operations = False
 
@@ -664,7 +668,10 @@ class DeltaAgent(Agent):
         plan_text: str,
         session_id: str,
     ) -> None:
-        """Parse an approved plan into tasks and send the plan widget.
+        """Parse an approved plan into tasks and merge with existing tasks.
+
+        Preserves existing pending/in_progress tasks and appends new unique
+        tasks from the approved plan. Uses AI to detect duplicates.
 
         Args:
             state: Compliance state for the session.
@@ -680,8 +687,31 @@ class DeltaAgent(Agent):
                 plan_text,
             )
 
-            # Store tasks in state
-            state.plan_tasks = [PlanTask(content=desc) for desc in task_descriptions]
+            # Get existing task descriptions for deduplication
+            existing_descriptions = [t.content for t in state.plan_tasks]
+
+            # Filter out duplicate tasks using AI classification
+            new_tasks: list[PlanTask] = []
+            for desc in task_descriptions:
+                try:
+                    is_duplicate = await asyncio.to_thread(
+                        classify_task_duplicate,
+                        classify_client,
+                        existing_descriptions + [t.content for t in new_tasks],
+                        desc,
+                    )
+                    if not is_duplicate:
+                        new_tasks.append(PlanTask(content=desc))
+                        logger.debug(f"Adding new task: {desc}")
+                    else:
+                        logger.debug(f"Skipping duplicate task: {desc}")
+                except InvalidTaskDuplicateResponse:
+                    # When uncertain, add the task (safer than losing work)
+                    new_tasks.append(PlanTask(content=desc))
+                    logger.warning(f"Duplicate check failed, adding task: {desc}")
+
+            # Merge: existing tasks + new unique tasks
+            state.plan_tasks.extend(new_tasks)
 
             # Send plan widget to UI
             entries = [
@@ -691,7 +721,10 @@ class DeltaAgent(Agent):
             plan_update = update_plan(entries)
             await self._conn.session_update(session_id=session_id, update=plan_update)
 
-            logger.info(f"Sent plan widget with {len(state.plan_tasks)} tasks")
+            logger.info(
+                f"Plan widget: {len(state.plan_tasks)} total tasks "
+                f"({len(new_tasks)} new, {len(existing_descriptions)} existing)"
+            )
 
         except InvalidPlanParseResponse as e:
             logger.warning(f"Failed to parse plan into tasks: {e}")

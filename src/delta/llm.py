@@ -117,6 +117,90 @@ class InvalidWriteClassificationResponse(Exception):
     pass
 
 
+class InvalidTaskDuplicateResponse(Exception):
+    """Raised when task duplicate classification returns an invalid response."""
+
+    pass
+
+
+def classify_task_duplicate(
+    client: ClaudeCodeClient,
+    existing_tasks: list[str],
+    new_task: str,
+    max_retries: int = 2,
+) -> bool:
+    """Classify whether a new task duplicates any existing task using AI.
+
+    ARCHITECTURAL DECISION: All text interpretation in Delta MUST use AI agents,
+    not hardcoded patterns. This ensures flexibility and maintainability.
+
+    Args:
+        client: Claude Code client (Haiku recommended for speed).
+        existing_tasks: List of existing task descriptions.
+        new_task: New task description to check for duplicates.
+        max_retries: Maximum retry attempts for invalid responses.
+
+    Returns:
+        True if the new task duplicates any existing task.
+
+    Raises:
+        InvalidTaskDuplicateResponse: If response is invalid after retries.
+    """
+    if not existing_tasks:
+        return False
+
+    existing_list = "\n".join(f"- {task}" for task in existing_tasks)
+
+    prompt = dedent(f"""\
+        Determine if the NEW TASK duplicates any EXISTING TASK.
+
+        EXISTING TASKS:
+        {existing_list}
+
+        NEW TASK: {new_task}
+
+        DUPLICATE: The new task is semantically equivalent to an existing task.
+        They describe the same work, even if worded differently.
+
+        UNIQUE: The new task describes different work not covered by existing tasks.
+
+        Reply with exactly one word: DUPLICATE or UNIQUE\
+    """)
+
+    system = "You classify tasks. Reply with exactly one word: DUPLICATE or UNIQUE"
+
+    for attempt in range(max_retries + 1):
+        response = client.complete(prompt=prompt, system=system)
+        response_upper = response.upper().strip()
+
+        if response_upper == "DUPLICATE" or response_upper.startswith("DUPLICATE\n"):
+            return True
+        if response_upper == "UNIQUE" or response_upper.startswith("UNIQUE\n"):
+            return False
+
+        # Invalid response - retry with callout
+        if attempt < max_retries:
+            prompt = dedent(f"""\
+                Your previous response was invalid: "{response}"
+
+                You MUST reply with exactly one word: DUPLICATE or UNIQUE
+
+                EXISTING TASKS:
+                {existing_list}
+
+                NEW TASK: {new_task}
+
+                Reply with exactly one word: DUPLICATE or UNIQUE\
+            """)
+        else:
+            raise InvalidTaskDuplicateResponse(
+                f"Invalid task duplicate classification after {max_retries + 1} attempts"
+            )
+
+    # Unreachable: loop always returns or raises
+    raise InvalidTaskDuplicateResponse("Unexpected exit from task duplicate loop")
+
+
 def classify_write_operation(
     client: ClaudeCodeClient,
     tool_name: str,

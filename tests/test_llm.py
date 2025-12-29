@@ -7,8 +7,10 @@ import pytest
 from delta.llm import (
     ClaudeCodeClient,
     InvalidComplexityResponse,
+    InvalidTaskDuplicateResponse,
     InvalidWriteClassificationResponse,
     classify_task_complexity,
+    classify_task_duplicate,
     classify_write_operation,
     interpret_for_user,
 )
@@ -168,3 +170,68 @@ class TestClassifyWriteOperation:
         # When/Then
         with pytest.raises(InvalidWriteClassificationResponse):
             classify_write_operation(client, "Bash", "Do something", max_retries=2)
+
+
+class TestClassifyTaskDuplicate:
+    """Tests for AI-based task duplicate classification.
+
+    Note: Task deduplication uses AI, not hardcoded patterns.
+    See AGENTS.md §13.1 for the architectural decision.
+    """
+
+    @pytest.mark.parametrize(
+        "response,expected",
+        [
+            ("DUPLICATE", True),
+            ("UNIQUE", False),
+            ("duplicate", True),  # lowercase
+            ("unique", False),  # lowercase
+            ("DUPLICATE\n", True),  # with newline
+        ],
+    )
+    def test_given_valid_response_when_classified_then_returns_expected(
+        self, response: str, expected: bool
+    ) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.return_value = response
+
+        # When
+        result = classify_task_duplicate(
+            client, ["Create user model"], "Add user database model"
+        )
+
+        # Then
+        assert result is expected
+
+    def test_given_empty_existing_tasks_when_classified_then_returns_false(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+
+        # When
+        result = classify_task_duplicate(client, [], "Create new feature")
+
+        # Then
+        assert result is False
+        client.complete.assert_not_called()
+
+    def test_given_invalid_then_valid_response_when_classified_then_retries(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.side_effect = ["INVALID", "DUPLICATE"]
+
+        # When
+        result = classify_task_duplicate(client, ["Task A"], "Task B")
+
+        # Then
+        assert result is True
+        assert client.complete.call_count == 2
+
+    def test_given_all_invalid_responses_when_classified_then_raises_error(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.return_value = "INVALID"
+
+        # When/Then
+        with pytest.raises(InvalidTaskDuplicateResponse):
+            classify_task_duplicate(client, ["Task A"], "Task B", max_retries=2)
