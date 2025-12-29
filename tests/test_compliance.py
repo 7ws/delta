@@ -269,3 +269,5 @@ class TestParseSimplePlanResponse:
         # When/Then
         with pytest.raises(ValueError, match="No JSON found"):
             parse_simple_plan_response(response)
+
+

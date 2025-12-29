@@ -7,7 +7,9 @@ import pytest
 from delta.llm import (
     ClaudeCodeClient,
     InvalidComplexityResponse,
+    InvalidWriteClassificationResponse,
     classify_task_complexity,
+    classify_write_operation,
     interpret_for_user,
 )
 
@@ -15,62 +17,28 @@ from delta.llm import (
 class TestClassifyTaskComplexity:
     """Tests for task complexity classification."""
 
-    def test_given_simple_response_when_classified_then_returns_simple(self) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "SIMPLE"
-
-        # When
-        result = classify_task_complexity(client, "Rewrite git history")
-
-        # Then
-        assert result == "SIMPLE"
-
-    def test_given_moderate_response_when_classified_then_returns_moderate(self) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "MODERATE"
-
-        # When
-        result = classify_task_complexity(client, "Add a new feature")
-
-        # Then
-        assert result == "MODERATE"
-
-    def test_given_complex_response_when_classified_then_returns_complex(self) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "COMPLEX"
-
-        # When
-        result = classify_task_complexity(client, "Design new architecture")
-
-        # Then
-        assert result == "COMPLEX"
-
-    def test_given_response_with_newline_when_classified_then_parses_correctly(
-        self,
+    @pytest.mark.parametrize(
+        "response,expected",
+        [
+            ("SIMPLE", "SIMPLE"),
+            ("MODERATE", "MODERATE"),
+            ("COMPLEX", "COMPLEX"),
+            ("simple", "SIMPLE"),  # lowercase
+            ("SIMPLE\n", "SIMPLE"),  # with newline
+        ],
+    )
+    def test_given_valid_response_when_classified_then_returns_expected(
+        self, response: str, expected: str
     ) -> None:
         # Given
         client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "SIMPLE\n"
+        client.complete.return_value = response
 
         # When
-        result = classify_task_complexity(client, "Run tests")
+        result = classify_task_complexity(client, "Do something")
 
         # Then
-        assert result == "SIMPLE"
-
-    def test_given_lowercase_response_when_classified_then_parses_correctly(self) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "simple"
-
-        # When
-        result = classify_task_complexity(client, "Rename file")
-
-        # Then
-        assert result == "SIMPLE"
+        assert result == expected
 
     def test_given_invalid_then_valid_response_when_classified_then_retries(self) -> None:
         # Given
@@ -92,14 +60,6 @@ class TestClassifyTaskComplexity:
         # When/Then
         with pytest.raises(InvalidComplexityResponse):
             classify_task_complexity(client, "Do something", max_retries=2)
-
-    def test_invalid_complexity_response_exception_message(self) -> None:
-        # Given
-        error = InvalidComplexityResponse("Invalid response: FOO")
-
-        # Then
-        assert "Invalid response" in str(error)
-        assert "FOO" in str(error)
 
 
 class TestInterpretForUser:
@@ -127,10 +87,13 @@ class TestInterpretForUser:
         # Then
         assert result == "Creating the mobile layout component..."
 
-    def test_given_empty_response_when_interpreted_then_returns_none(self) -> None:
+    @pytest.mark.parametrize("response", ["", "   \n  "])
+    def test_given_empty_or_whitespace_response_when_interpreted_then_returns_none(
+        self, response: str
+    ) -> None:
         # Given
         client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = ""
+        client.complete.return_value = response
 
         # When
         result = interpret_for_user(client, "Some text", "planning")
@@ -138,13 +101,70 @@ class TestInterpretForUser:
         # Then
         assert result is None
 
-    def test_given_whitespace_response_when_interpreted_then_returns_none(self) -> None:
+    @pytest.mark.parametrize(
+        "text",
+        ["The inner agent completed", "workflow phase transition"],
+    )
+    def test_given_internal_reference_when_interpreted_then_suppressed(
+        self, text: str
+    ) -> None:
         # Given
         client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "   \n  "
 
         # When
-        result = interpret_for_user(client, "Some text", "reviewing")
+        result = interpret_for_user(client, text, "executing")
 
         # Then
         assert result is None
+
+
+class TestClassifyWriteOperation:
+    """Tests for AI-based write operation classification.
+
+    Note: Write classification uses AI, not hardcoded patterns.
+    See AGENTS.md §13.1 for the architectural decision.
+    """
+
+    @pytest.mark.parametrize(
+        "response,expected",
+        [
+            ("WRITE", True),
+            ("READONLY", False),
+            ("write", True),  # lowercase
+            ("readonly", False),  # lowercase
+            ("WRITE\n", True),  # with newline
+        ],
+    )
+    def test_given_valid_response_when_classified_then_returns_expected(
+        self, response: str, expected: bool
+    ) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.return_value = response
+
+        # When
+        result = classify_write_operation(client, "Tool", "Do something")
+
+        # Then
+        assert result is expected
+
+    def test_given_invalid_then_valid_response_when_classified_then_retries(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.side_effect = ["INVALID", "WRITE"]
+
+        # When
+        result = classify_write_operation(client, "Write", "Write file: /tmp/test.py")
+
+        # Then
+        assert result is True
+        assert client.complete.call_count == 2
+
+    def test_given_all_invalid_responses_when_classified_then_raises_error(self) -> None:
+        # Given
+        client = MagicMock(spec=ClaudeCodeClient)
+        client.complete.return_value = "INVALID"
+
+        # When/Then
+        with pytest.raises(InvalidWriteClassificationResponse):
+            classify_write_operation(client, "Bash", "Do something", max_retries=2)

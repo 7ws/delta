@@ -441,6 +441,19 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 ---
 
 
+# 13. Architectural Decisions
+
+## 13.1 Text Interpretation
+
+- 13.1.1: All text interpretation MUST use AI agents. Do not use hardcoded patterns, regular expressions, or string matching for text classification.
+- 13.1.2: This applies to command classification, intent detection, write operation detection, and any semantic analysis.
+- 13.1.3: AI-based classification ensures flexibility, maintainability, and consistency across edge cases that patterns cannot anticipate.
+- 13.1.4: When AI classification fails, default to the safer option (for example, treat uncertain operations as writes requiring review).
+
+
+---
+
+
 # Glossary
 
 - **Completed**: Changes delivered to `main`, ready for release.

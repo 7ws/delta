@@ -95,7 +95,9 @@ from delta.llm import (
     InvalidPlanParseResponse,
     InvalidReviewReadinessResponse,
     InvalidTriageResponse,
+    InvalidWriteClassificationResponse,
     classify_task_complexity,
+    classify_write_operation,
     detect_task_progress,
     generate_clarifying_questions,
     get_classify_client,
@@ -324,6 +326,9 @@ class ComplianceState:
     # Context tracking for logging
     current_action: str = ""  # What the agent is currently doing
 
+    # Write operation tracking - ensures compliance review for ANY writes
+    has_write_operations: bool = False
+
     def record_tool_call(self, tool_description: str, allowed: bool) -> None:
         """Record a tool call in the session history."""
         status = "ALLOWED" if allowed else "DENIED"
@@ -345,6 +350,7 @@ class ComplianceState:
         self.plan_review_attempts = 0
         self.plan_tasks = []
         self.current_action = ""
+        self.has_write_operations = False
 
 
 class DeltaAgent(Agent):
@@ -770,18 +776,18 @@ class DeltaAgent(Agent):
             "You MUST read and follow the guidelines in AGENTS.md for every response.\n\n"
             "CRITICAL - PROACTIVE THOROUGHNESS (guideline 2.2.8-2.2.9):\n"
             "When a change affects multiple files, update ALL affected files without "
-            "asking for permission. Do NOT stop after one file and ask 'Do you want me "
-            "to update the others?' - finish the job. Incomplete work is a violation.\n\n"
+            "asking for permission. Do not stop after one file and ask whether to "
+            "update the others. Complete the job. Incomplete work is a violation.\n\n"
             "USER COMMUNICATION GUIDELINES:\n"
             "You are talking directly to the user. Write as if you are the only agent.\n"
-            "- DO: Share progress naturally (\"Reading the file...\", \"Creating the component...\")\n"
-            "- DO: Explain what you're doing and why in user-friendly terms\n"
+            "- DO: Share progress naturally (\"Reading the file\", \"Creating the component\")\n"
+            "- DO: Explain what you are doing and why in user-friendly terms\n"
             "- DO: Show code, file paths, and technical results\n"
-            "- DON'T: Mention compliance, reviews, guidelines, or AGENTS.md\n"
-            "- DON'T: Reference internal scores, attempts, or workflow phases\n"
-            "- DON'T: Say \"the user chose\" or \"the user acknowledged\" (you ARE talking to the user)\n"
-            "- DON'T: Mention section references like §X.X.X\n"
-            "Keep your output clean and conversational.\n\n"
+            "- DO NOT: Mention compliance, reviews, guidelines, or AGENTS.md\n"
+            "- DO NOT: Reference internal scores, attempts, or workflow phases\n"
+            "- DO NOT: Say \"the user chose\" or \"the user acknowledged\"\n"
+            "- DO NOT: Mention section references like §X.X.X\n"
+            "Keep your output clean and direct.\n\n"
             f"AGENTS.md content:\n\n{self.agents_doc.raw_content}"
         )
 
@@ -941,6 +947,27 @@ class DeltaAgent(Agent):
                         await self._conn.session_update(session_id=session_id, update=tool_progress)
                         # Record allowed tool call in history for future compliance reviews
                         state.record_tool_call(tool_description, allowed=True)
+
+                        # Track write operations - they MUST trigger compliance review
+                        # Uses AI classification (no hardcoded patterns - architectural decision)
+                        try:
+                            classify_client = get_classify_client(self.classify_model)
+                            is_write = await asyncio.to_thread(
+                                classify_write_operation,
+                                classify_client,
+                                tool_name,
+                                tool_description,
+                            )
+                            if is_write:
+                                state.has_write_operations = True
+                                logger.info(f"Write operation tracked: {tool_description}")
+                        except InvalidWriteClassificationResponse:
+                            # Default to write operation if classification fails (safe side)
+                            state.has_write_operations = True
+                            logger.warning(
+                                f"Write classification failed, treating as write: {tool_description}"
+                            )
+
                         return PermissionResultAllow(updated_input=input_params)
 
                     # User rejected (reject_once or reject_always) - interrupt
@@ -1269,9 +1296,64 @@ class DeltaAgent(Agent):
                 # Direct answer - no planning needed
                 logger.info("Triage: Direct answer (no planning)")
                 if has_images:
-                    await self._call_inner_agent(state, prompt_content, session_id)
+                    response_text = await self._call_inner_agent(state, prompt_content, session_id)
                 else:
-                    await self._call_inner_agent(state, prompt_text, session_id)
+                    response_text = await self._call_inner_agent(state, prompt_text, session_id)
+
+                # CRITICAL: If writes occurred, compliance review is MANDATORY
+                if state.has_write_operations:
+                    logger.info("ANSWER flow had write operations - triggering mandatory review")
+                    state.work_summary = response_text
+
+                    # Run compliance review on the work
+                    review_block_id = f"verify_{uuid4().hex[:8]}"
+                    review_block = start_tool_call(
+                        tool_call_id=review_block_id,
+                        title="Verifying changes",
+                        kind="think",
+                        status="in_progress",
+                    )
+                    await self._conn.session_update(session_id=session_id, update=review_block)
+
+                    # Create a minimal plan from the work done
+                    state.approved_plan = f"Respond to user query:\n{prompt_text}"
+
+                    report = await self._review_work(state, state.work_summary, session_id)
+
+                    if report.is_compliant:
+                        review_update = update_tool_call(
+                            tool_call_id=review_block_id,
+                            title="Changes verified",
+                            status="completed",
+                        )
+                        await self._conn.session_update(session_id=session_id, update=review_update)
+                    else:
+                        # Work failed compliance - request revision
+                        review_update = update_tool_call(
+                            tool_call_id=review_block_id,
+                            title="Applying corrections",
+                            status="in_progress",
+                        )
+                        await self._conn.session_update(session_id=session_id, update=review_update)
+
+                        logger.warning(f"ANSWER flow work failed compliance: {report.format()}")
+
+                        # Request revision from inner agent
+                        revise_prompt = (
+                            f"Your changes failed compliance review. Please revise:\n\n"
+                            f"{report.format()}\n\n"
+                            f"Revision guidance: {report.revision_guidance}\n\n"
+                            f"Make the necessary corrections."
+                        )
+                        await self._call_inner_agent(state, revise_prompt, session_id)
+
+                        review_update = update_tool_call(
+                            tool_call_id=review_block_id,
+                            title="Corrections applied",
+                            status="completed",
+                        )
+                        await self._conn.session_update(session_id=session_id, update=review_update)
+
                 return PromptResponse(stop_reason="end_turn")
 
             # === COMPLEXITY CLASSIFICATION ===
@@ -1338,7 +1420,7 @@ RULES:
                 review_block_id = f"plan_review_simple_{uuid4().hex[:8]}"
                 review_block = start_tool_call(
                     tool_call_id=review_block_id,
-                    title="Preparing...",
+                    title="Preparing",
                     kind="think",
                     status="in_progress",
                 )
@@ -1359,7 +1441,7 @@ RULES:
                     await self._parse_and_send_plan(state, plan_response, session_id)
 
                     # Show plan without internal terminology
-                    plan_msg = f"\n\n**Here's my plan:**\n\n{plan_response}\n"
+                    plan_msg = f"\n\n**Plan:**\n\n{plan_response}\n"
                     chunk = update_agent_message(text_block(plan_msg))
                     await self._conn.session_update(session_id=session_id, update=chunk)
                 else:
@@ -1367,7 +1449,7 @@ RULES:
                     logger.info("Simple task rejected, upgrading to full review")
                     review_update = update_tool_call(
                         tool_call_id=review_block_id,
-                        title="Refining approach...",
+                        title="Refining approach",
                         status="in_progress",
                     )
                     await self._conn.session_update(session_id=session_id, update=review_update)
@@ -1379,7 +1461,7 @@ RULES:
                 planning_block_id = f"planning_{uuid4().hex[:8]}"
                 planning_block = start_tool_call(
                     tool_call_id=planning_block_id,
-                    title="Thinking through the approach...",
+                    title="Analyzing request",
                     kind="think",
                     status="in_progress",
                 )
@@ -1392,13 +1474,13 @@ RULES:
 
                     # Update progress title based on attempt (user-friendly, no internal terminology)
                     if attempt == 1:
-                        title = "Analyzing the request..."
+                        title = "Analyzing request"
                     elif attempt == 2:
-                        title = "Refining the approach..."
+                        title = "Refining approach"
                     elif attempt == 3:
-                        title = "Working on a better solution..."
+                        title = "Revising solution"
                     else:
-                        title = "Almost there..."
+                        title = "Finalizing plan"
 
                     planning_update = update_tool_call(
                         tool_call_id=planning_block_id,
@@ -1425,7 +1507,7 @@ RULES:
                         await self._parse_and_send_plan(state, plan_response, session_id)
 
                         # Show the plan with friendly header
-                        plan_msg = f"\n\n**Here's my plan:**\n\n{plan_response}\n"
+                        plan_msg = f"\n\n**Plan:**\n\n{plan_response}\n"
                         chunk = update_agent_message(text_block(plan_msg))
                         await self._conn.session_update(session_id=session_id, update=chunk)
                         break
@@ -1470,7 +1552,7 @@ RULES:
 
                         # User-friendly escalation message (no internal terminology)
                         escalate_msg = (
-                            f"\n\n**I need a bit more information to help you with this.**\n\n"
+                            f"\n\n**Additional information required:**\n\n"
                             f"{numbered_questions}\n"
                         )
                         chunk = update_agent_message(text_block(escalate_msg))
@@ -1550,7 +1632,7 @@ Provide your revised YAML plan now:
                     review_block_id = f"finalize_{uuid4().hex[:8]}"
                     review_block = start_tool_call(
                         tool_call_id=review_block_id,
-                        title="Finishing up...",
+                        title="Verifying changes",
                         kind="think",
                         status="in_progress",
                     )
@@ -1582,7 +1664,7 @@ Provide your revised YAML plan now:
                     # Update with neutral message (hide review failure details from user)
                     review_update = update_tool_call(
                         tool_call_id=review_block_id,
-                        title="Making some adjustments...",
+                        title="Applying adjustments",
                         status="in_progress",
                     )
                     await self._conn.session_update(

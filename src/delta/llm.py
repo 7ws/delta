@@ -111,6 +111,100 @@ class InvalidComplexityResponse(Exception):
     pass
 
 
+class InvalidWriteClassificationResponse(Exception):
+    """Raised when write operation classification returns an invalid response."""
+
+    pass
+
+
+def classify_write_operation(
+    client: ClaudeCodeClient,
+    tool_name: str,
+    tool_description: str,
+    max_retries: int = 2,
+) -> bool:
+    """Classify whether a tool operation is a write operation using AI.
+
+    ARCHITECTURAL DECISION: All text interpretation in Delta MUST use AI agents,
+    not hardcoded patterns. This ensures flexibility and maintainability.
+
+    Write operations MUST trigger compliance review. This function uses AI to
+    determine whether a tool call modifies state (files, git, system).
+
+    Args:
+        client: Claude Code client (Haiku recommended for speed).
+        tool_name: Name of the tool being called.
+        tool_description: Human-readable description of the operation.
+        max_retries: Maximum retry attempts for invalid responses.
+
+    Returns:
+        True if the operation modifies state and requires compliance review.
+
+    Raises:
+        InvalidWriteClassificationResponse: If response is invalid after retries.
+    """
+    prompt = dedent(f"""\
+        Classify this tool operation as WRITE or READONLY.
+
+        Tool: {tool_name}
+        Operation: {tool_description}
+
+        WRITE: The operation modifies state. This includes:
+        - Creating, modifying, or deleting files
+        - Git write operations (add, commit, push, pull, merge, rebase, reset, checkout,
+          switch, restore, stash, cherry-pick, revert, tag, branch -d/-D/-m, clean, am, apply)
+        - Package manager installs or uninstalls
+        - Running build, test, or install commands that may create artifacts
+        - Shell commands with redirects (> or >>), rm, mkdir, touch, mv, cp, chmod, chown, ln
+        - Any operation that could have side effects
+
+        READONLY: The operation only reads data with no side effects. This includes:
+        - Reading files (cat, head, tail, less, more)
+        - Listing files or directories (ls, find)
+        - Searching (grep, rg)
+        - Git read operations (status, diff, log, show, branch, remote, fetch, ls-files,
+          ls-tree, rev-parse, describe, reflog, stash list, config --get, config --list)
+        - Package manager queries (pip list/show/freeze, npm list/ls/view/info)
+        - Version checks (--version)
+        - System info (pwd, env, printenv, hostname, uname, whoami, id, date, cal, uptime)
+
+        CRITICAL: When uncertain, classify as WRITE. Safety requires review of uncertain operations.
+
+        Reply with exactly one word: WRITE or READONLY\
+    """)
+
+    system = "You classify tool operations. Reply with exactly one word: WRITE or READONLY"
+
+    for attempt in range(max_retries + 1):
+        response = client.complete(prompt=prompt, system=system)
+        response_upper = response.upper().strip()
+
+        if response_upper == "WRITE" or response_upper.startswith("WRITE\n"):
+            return True
+        if response_upper == "READONLY" or response_upper.startswith("READONLY\n"):
+            return False
+
+        # Invalid response - retry with callout
+        if attempt < max_retries:
+            prompt = dedent(f"""\
+                Your previous response was invalid: "{response}"
+
+                You MUST reply with exactly one word: WRITE or READONLY
+
+                Tool: {tool_name}
+                Operation: {tool_description}
+
+                Reply with exactly one word: WRITE or READONLY\
+            """)
+        else:
+            raise InvalidWriteClassificationResponse(
+                f"Invalid write classification after {max_retries + 1} attempts: {response}"
+            )
+
+    # Unreachable: loop always returns or raises
+    raise InvalidWriteClassificationResponse("Unexpected exit from write classification loop")
+
+
 def classify_task_complexity(
     client: ClaudeCodeClient, message: str, max_retries: int = 2
 ) -> str:
@@ -234,17 +328,22 @@ def triage_user_message(
         User message:
         {message}
 
-        ANSWER: The message is read-only and produces no edits. This includes:
-        - Questions about the codebase ("How does X work?", "What is...", "Explain...")
-        - Search requests ("Find all uses of X", "Where is X defined?")
-        - Status checks ("What files changed?", "Show git status")
-        - Read operations ("Read file X", "Show me the contents of...")
+        ANSWER: The message is PURELY read-only with ZERO possibility of edits. Use ONLY when:
+        - Pure questions about the codebase ("How does X work?", "What is...", "Explain...")
+        - Pure search requests ("Find all uses of X", "Where is X defined?")
+        - Pure status checks ("What files changed?", "Show git status")
+        - Pure read operations ("Read file X", "Show me the contents of...")
 
-        PLAN: The message produces edits or executes commands that change state. This includes:
+        PLAN: The message MAY produce edits or MAY execute commands. Use when:
         - Creating, modifying, or deleting files
         - Git commits, pushes, or any write operations
-        - Running build, test, or install commands that modify the filesystem
+        - Running build, test, or install commands
         - Any explicit request to "add", "fix", "update", "implement", "create", "delete", "remove"
+        - ANY ambiguous request that MIGHT require changes
+        - ANY request that COULD involve running commands beyond pure reads
+
+        CRITICAL: When uncertain, ALWAYS choose PLAN. Write operations MUST be reviewed.
+        Only use ANSWER when you are 100% certain no writes will occur.
 
         Reply with exactly one word: PLAN or ANSWER\
     """)
@@ -675,6 +774,10 @@ def interpret_for_user(
         "3/5",
         "2/5",
         "1/5",
+        "inner agent",
+        "outer agent",
+        "workflow phase",
+        "phase transition",
     ]
 
     text_lower = inner_agent_text.lower()
@@ -693,9 +796,9 @@ def interpret_for_user(
 context:
   goal: Present a seamless single-agent experience to the human user
   architecture: |
-    This is a multi-agent system, but the user should feel they're talking to ONE agent.
-    - The user only sees the final, polished output
-    - Internal orchestration, reviews, and agent coordination are hidden
+    This is a multi-agent system, but the user should perceive a single agent.
+    - The user sees only the final, polished output
+    - Internal orchestration, reviews, and agent coordination remain hidden
   current_phase: {workflow_phase}{context_section}
 ---
 
@@ -721,7 +824,7 @@ KEEP and CLEAN these (output the cleaned text):
 OUTPUT FORMAT:
 - If content should be hidden from user: output exactly "SUPPRESS"
 - If content is useful: output the cleaned text, written as if speaking directly to the user
-- Be conversational and helpful, not robotic
+- Use clear, direct language
 - Remove any references to internal processes
 ---
 
