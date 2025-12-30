@@ -56,7 +56,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 ## 2.1 Research and Understanding
 
 - 2.1.1: Read code before proposing changes. Do not suggest modifications to files you have not read.
-- 2.1.2: Search the codebase exhaustively for existing patterns before implementing. Examine all candidates, not the first match.
+- 2.1.2: Search the codebase exhaustively for existing patterns before implementing. Use Glob to find files by extension and directory structure. Use Grep to find naming patterns, function signatures, and structural conventions. Perform at least three search iterations using different naming conventions and synonyms. Examine all candidates, not the first match.
 - 2.1.3: Research online (official documentation, GitHub issues, community forums) before making assumptions about framework conventions or best practices.
 - 2.1.4: Ask clarifying questions or state "I do not know" when uncertain. Do not speculate.
 - 2.1.5: Read test files and documentation to understand expected behaviour. They define contracts that implementations must honour.
@@ -114,6 +114,13 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 2.8.1: Avoid discourse deixis. Do not write "as discussed", "the earlier issue", or "mentioned above".
 - 2.8.2: Avoid temporal deixis. Do not write "now works", "previously failed", or "currently".
 - 2.8.3: State facts directly without requiring external context.
+
+## 2.9 Pattern Discovery
+
+- 2.9.1: Identify at least three similar implementations in the codebase before proposing new code. If fewer than three exist, state this finding and proceed with available examples.
+- 2.9.2: Conform to discovered patterns in naming, structure, error handling, and style. Deviate only when the user explicitly requests a different approach.
+- 2.9.3: When established patterns cannot be followed, state the specific reason before proceeding. Do not silently deviate.
+- 2.9.4: When inconsistent patterns are discovered across the codebase, inform the user and offer to assist with standardisation. Do not standardise without explicit user request.
 
 
 ---
