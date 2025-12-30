@@ -1004,9 +1004,26 @@ class DeltaAgent(Agent):
         # Create orchestrator with callbacks
         orchestrator = self._get_workflow_orchestrator(session_id)
 
+        # Send early status update to inform user that processing has started
+        triage_block_id = f"triage_{uuid4().hex[:8]}"
+        triage_block = start_tool_call(
+            tool_call_id=triage_block_id,
+            title="Analyzing request",
+            kind="think",
+            status="in_progress",
+        )
+        await self._conn.session_update(session_id=session_id, update=triage_block)
+
         try:
             # === TRIAGE: Determine if planning is needed ===
             triage_result = await orchestrator.triage(ctx)
+
+            # Complete the triage status
+            triage_update = update_tool_call(
+                tool_call_id=triage_block_id,
+                status="completed",
+            )
+            await self._conn.session_update(session_id=session_id, update=triage_update)
 
             if not triage_result.needs_planning:
                 # Direct answer - no planning needed
