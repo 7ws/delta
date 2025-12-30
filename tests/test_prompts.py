@@ -121,53 +121,64 @@ class TestBuildBatchWorkReviewPrompt:
         assert "Added test file" in result
         assert "Write file: test.py" in result
 
-    def test_precommit_check_is_conditional(self):
-        """Pre-commit check should be conditional on project configuration."""
-        agents_doc = MagicMock()
-        agents_doc.raw_content = "Guidelines"
-        agents_doc.major_sections = []
 
-        result = build_batch_work_review_prompt(
-            agents_doc,
-            user_prompt="Add tests",
-            plan="1. Write tests",
-            work_summary="Added test file",
-            tool_history=["Write file: test.py"],
+class TestTemplateCompliance:
+    """Tests for template compliance with AGENTS.md guidelines."""
+
+    def test_plan_review_no_section_highlighting(self):
+        """PLAN_REVIEW_TEMPLATE must not contain section-specific highlighting."""
+        # Given
+        from delta.prompts import PLAN_REVIEW_TEMPLATE
+
+        # Then
+        assert "Key planning guidelines" not in PLAN_REVIEW_TEMPLATE
+        assert "Key guidelines" not in PLAN_REVIEW_TEMPLATE
+
+    def test_batch_review_no_section_highlighting(self):
+        """BATCH_WORK_REVIEW_TEMPLATE must not contain section-specific highlighting."""
+        # Given
+        from delta.prompts import BATCH_WORK_REVIEW_TEMPLATE
+
+        # Then
+        assert "Key execution guidelines" not in BATCH_WORK_REVIEW_TEMPLATE
+        assert "Key guidelines" not in BATCH_WORK_REVIEW_TEMPLATE
+
+    def test_simple_plan_review_no_section_highlighting(self):
+        """SIMPLE_PLAN_REVIEW_TEMPLATE must not contain section-specific highlighting."""
+        # Given
+        from delta.prompts import SIMPLE_PLAN_REVIEW_TEMPLATE
+
+        # Then
+        assert "Key guidelines" not in SIMPLE_PLAN_REVIEW_TEMPLATE
+
+    def test_no_inclusive_language_violations(self):
+        """Templates must not contain inclusive language violations per section 1.5.2."""
+        # Given
+        from delta.prompts import (
+            BATCH_WORK_REVIEW_TEMPLATE,
+            PLAN_REVIEW_TEMPLATE,
+            SIMPLE_PLAN_REVIEW_TEMPLATE,
         )
 
-        # Should indicate pre-commit is only checked if configured
-        assert "ONLY if pre-commit is configured" in result
-        assert "score N/A" in result
+        forbidden_terms = [
+            "sanity check",
+            "sanity test",
+            "whitelist",
+            "blacklist",
+            "master/slave",
+            "man hours",
+        ]
 
+        templates = [
+            ("SIMPLE_PLAN_REVIEW_TEMPLATE", SIMPLE_PLAN_REVIEW_TEMPLATE),
+            ("PLAN_REVIEW_TEMPLATE", PLAN_REVIEW_TEMPLATE),
+            ("BATCH_WORK_REVIEW_TEMPLATE", BATCH_WORK_REVIEW_TEMPLATE),
+        ]
 
-class TestPreCommitConditionalCheck:
-    """Tests for conditional pre-commit verification."""
-
-    def test_plan_review_mentions_conditional_precommit(self):
-        """Plan review prompt should mention pre-commit is conditional."""
-        agents_doc = MagicMock()
-        agents_doc.raw_content = "Guidelines"
-        agents_doc.major_sections = []
-
-        result = build_plan_review_prompt(agents_doc, "Add feature", "1. Add code")
-
-        # Should mention pre-commit is conditional on configuration
-        assert "pre-commit" in result.lower()
-        assert "N/A" in result
-
-    def test_batch_review_instructs_na_for_missing_precommit(self):
-        """Batch review should instruct to score N/A when pre-commit is not configured."""
-        agents_doc = MagicMock()
-        agents_doc.raw_content = "Guidelines"
-        agents_doc.major_sections = []
-
-        result = build_batch_work_review_prompt(
-            agents_doc,
-            user_prompt="Fix bug",
-            plan="1. Fix issue",
-            work_summary="Fixed the bug",
-        )
-
-        # Should include instructions about N/A for missing pre-commit
-        assert "pre-commit is NOT available" in result or "not in pyproject.toml" in result
-        assert "Do not penalize" in result
+        # Then
+        for template_name, template_content in templates:
+            template_lower = template_content.lower()
+            for term in forbidden_terms:
+                assert term not in template_lower, (
+                    f"{template_name} contains forbidden term: {term}"
+                )

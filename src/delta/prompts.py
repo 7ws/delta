@@ -35,7 +35,7 @@ class PromptTemplate:
 
 
 SIMPLE_PLAN_REVIEW_TEMPLATE = """\
-You are a compliance reviewer performing a quick sanity check on a SIMPLE task plan.
+You are a compliance reviewer performing a quick validation on a SIMPLE task plan.
 
 Simple tasks are well-understood operations: git rewrites, file renames, config changes,
 standard git operations, running commands. They do not require full guideline evaluation.
@@ -52,7 +52,7 @@ standard git operations, running commands. They do not require full guideline ev
 
 {git_state}
 
-## Quick Check
+## Validation
 
 Verify these essentials only:
 1. Does the plan address what the user asked for?
@@ -124,20 +124,6 @@ Evaluate the plan against EVERY major section in AGENTS.md. For each section:
 
 3. Calculate the average score for each section
 4. Provide specific feedback for any score below 5/5
-
-Key planning guidelines to evaluate:
-- §2.1: Research and understanding (read code first, search existing patterns)
-- §2.2: Scope and focus (minimal changes, no unsolicited additions)
-- §2.8: Documentation and test maintenance (tests AND documentation in same commit)
-  - CRITICAL: If the change affects user-visible behaviour and documentation exists for the
-    affected area, the plan MUST include documentation updates. "Documentation does not
-    mention this feature" is NOT a valid reason to skip documentation - it means the
-    documentation is incomplete and MUST be updated.
-- §3: Git operations (branch naming, staging)
-  - Pre-commit (§3.3) applies ONLY if configured in the project. If no pre-commit config
-    exists (no .pre-commit-config.yaml, not in pyproject.toml), score N/A and skip.
-- §4: Commit messages (atomicity, format)
-- §11: Testing (tests required for new features and fixes)
 
 ## Required Output Format
 
@@ -212,25 +198,6 @@ Evaluate the completed work against EVERY major section in AGENTS.md. For each s
 3. Calculate the average score for each section
 4. Provide specific feedback for any score below 5/5
 
-Key execution guidelines to evaluate:
-- §2.1: Did the agent read files before editing?
-- §2.2: Are changes minimal and focused?
-- §2.3: Are warnings and errors addressed?
-- §2.8: Are documentation and tests updated together?
-  - CRITICAL: If the change affects user-visible behaviour (UI, API, user-facing features)
-    and documentation exists for the affected area, documentation MUST be updated.
-    "The existing documentation does not mention this feature" is a FAILURE, not a pass.
-    Missing documentation for a feature means the documentation is incomplete and must be
-    fixed as part of this work. Score 1/5 if documentation updates are skipped when they
-    should have been included.
-- §3.2: Are files staged explicitly?
-- §3.3: Pre-commit verification (ONLY if pre-commit is configured in the project)
-  - If pre-commit is NOT available (not in pyproject.toml, no .pre-commit-config.yaml),
-    score N/A and skip this check entirely. Do not penalize for missing pre-commit.
-  - If pre-commit IS configured and was not run, score 1/5.
-- §4.4: Is the commit atomic (code + tests + documentation together)?
-- §11: Are tests included for new features and fixes?
-
 ## Required Output Format
 
 ```json
@@ -273,7 +240,7 @@ def build_simple_plan_review_prompt(
         git_state: Current Git state (branch, working tree status).
 
     Returns:
-        Formatted prompt for quick sanity check.
+        Formatted prompt for quick validation.
     """
     git_state_text = git_state or "(Git state not available)"
     return SIMPLE_PLAN_REVIEW_TEMPLATE.format(

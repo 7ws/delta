@@ -92,7 +92,7 @@ class ReviewPhaseHandler:
 
         async def llm_call(p: str) -> str:
             return await self._llm_call(
-                p, "You are a quick sanity checker. Output only valid JSON."
+                p, "You are a quick validator. Output only valid JSON."
             )
 
         try:

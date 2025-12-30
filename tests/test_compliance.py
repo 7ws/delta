@@ -199,7 +199,7 @@ class TestBuildSimplePlanReviewPrompt:
         assert user_prompt in prompt
         assert plan in prompt
         assert "SIMPLE task" in prompt
-        assert "sanity check" in prompt
+        assert "quick validation" in prompt
 
 
 class TestParseSimplePlanResponse:
