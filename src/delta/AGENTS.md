@@ -88,7 +88,12 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 - 2.5.1: Commands cannot receive interactive input during execution. Do not use commands that prompt for input, open editors, or display pagers. Use scripted alternatives: pipe input (for example, `printf 'y\nn\n' | git add -p`), set environment variables (for example, `GIT_EDITOR=true git rebase --continue`), or use flags that skip interaction (for example, `git commit --no-edit`).
 - 2.5.2: Use the `--no-pager` flag for git commands.
-- 2.5.3: Before running commands, examine the codebase to discover correct entrypoints. Check `pyproject.toml`, `package.json`, `Makefile`, or equivalent configuration files.
+- 2.5.3: Before running commands, examine the codebase to discover correct entrypoints. Check these files in order until the command is found:
+  1. `README.md` or `README.rst` (often contains canonical instructions)
+  2. `Makefile` or `justfile` (defines project-specific targets)
+  3. `.github/workflows/*.yml` or `.gitlab-ci.yml` (CI defines tested commands)
+  4. `pyproject.toml`, `package.json`, `Cargo.toml`, or equivalent build configuration
+  Do not guess commands. If no entrypoint is documented, ask the user.
 
 ## 2.6 Guideline Violations
 
