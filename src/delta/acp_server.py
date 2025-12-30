@@ -75,9 +75,10 @@ from claude_agent_sdk import (
 from delta.compliance import ComplianceReport
 from delta.guidelines import (
     AgentsDocument,
-    find_agents_md,
     get_bundled_agents_md,
+    load_merged_agents_md,
     parse_agents_md,
+    parse_agents_md_from_content,
 )
 from delta.llm import (
     ClaudeCodeClient,
@@ -225,25 +226,33 @@ class DeltaAgent(Agent):
         return self.sessions[session_id]
 
     def _load_agents_md(self, cwd: Path | None = None) -> None:
-        """Load or reload AGENTS.md.
+        """Load or reload AGENTS.md with bundled defaults and project overrides.
 
-        Searches for AGENTS.md in the following order:
-        1. Explicit path provided via constructor
-        2. Target codebase (searching upward from cwd)
-        3. Bundled AGENTS.md shipped with Delta (fallback)
+        Always loads the bundled AGENTS.md first as the base, then merges with
+        any project-local AGENTS.md found in the cwd hierarchy. This ensures:
+        1. Delta's core guidelines are always present
+        2. Project-specific overrides take precedence when they exist
+
+        Explicit path via constructor bypasses merging and uses only that file.
         """
-        if self.agents_md_path is None:
-            if self._explicit_agents_md_path is not None:
-                self.agents_md_path = self._explicit_agents_md_path
+        if self._explicit_agents_md_path is not None:
+            # Explicit path provided - use it directly without merging
+            self.agents_md_path = self._explicit_agents_md_path
+            self.agents_doc = parse_agents_md(self.agents_md_path)
+            logger.info(f"Using explicit AGENTS.md: {self.agents_md_path}")
+        else:
+            # Load bundled + project merged content
+            path, content = load_merged_agents_md(cwd)
+            self.agents_md_path = path
+            self.agents_doc = parse_agents_md_from_content(content)
+
+            bundled_path = get_bundled_agents_md()
+            if path != bundled_path:
+                logger.info(
+                    f"Loaded AGENTS.md: bundled ({bundled_path}) merged with project ({path})"
+                )
             else:
-                self.agents_md_path = find_agents_md(cwd)
-                if self.agents_md_path is None:
-                    # Fall back to bundled AGENTS.md
-                    self.agents_md_path = get_bundled_agents_md()
-                    logger.info(
-                        f"No AGENTS.md in target codebase, using bundled: {self.agents_md_path}"
-                    )
-        self.agents_doc = parse_agents_md(self.agents_md_path)
+                logger.info(f"Loaded AGENTS.md: bundled only ({bundled_path})")
 
     def _get_review_handler(self) -> ReviewPhaseHandler:
         """Get or create the review handler with current agents_doc."""

@@ -120,3 +120,54 @@ class TestBuildBatchWorkReviewPrompt:
         assert "1. Write tests" in result
         assert "Added test file" in result
         assert "Write file: test.py" in result
+
+    def test_precommit_check_is_conditional(self):
+        """Pre-commit check should be conditional on project configuration."""
+        agents_doc = MagicMock()
+        agents_doc.raw_content = "Guidelines"
+        agents_doc.major_sections = []
+
+        result = build_batch_work_review_prompt(
+            agents_doc,
+            user_prompt="Add tests",
+            plan="1. Write tests",
+            work_summary="Added test file",
+            tool_history=["Write file: test.py"],
+        )
+
+        # Should indicate pre-commit is only checked if configured
+        assert "ONLY if pre-commit is configured" in result
+        assert "score N/A" in result
+
+
+class TestPreCommitConditionalCheck:
+    """Tests for conditional pre-commit verification."""
+
+    def test_plan_review_mentions_conditional_precommit(self):
+        """Plan review prompt should mention pre-commit is conditional."""
+        agents_doc = MagicMock()
+        agents_doc.raw_content = "Guidelines"
+        agents_doc.major_sections = []
+
+        result = build_plan_review_prompt(agents_doc, "Add feature", "1. Add code")
+
+        # Should mention pre-commit is conditional on configuration
+        assert "pre-commit" in result.lower()
+        assert "N/A" in result
+
+    def test_batch_review_instructs_na_for_missing_precommit(self):
+        """Batch review should instruct to score N/A when pre-commit is not configured."""
+        agents_doc = MagicMock()
+        agents_doc.raw_content = "Guidelines"
+        agents_doc.major_sections = []
+
+        result = build_batch_work_review_prompt(
+            agents_doc,
+            user_prompt="Fix bug",
+            plan="1. Fix issue",
+            work_summary="Fixed the bug",
+        )
+
+        # Should include instructions about N/A for missing pre-commit
+        assert "pre-commit is NOT available" in result or "not in pyproject.toml" in result
+        assert "Do not penalize" in result

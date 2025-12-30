@@ -121,7 +121,9 @@ Key planning guidelines to evaluate:
     affected area, the plan MUST include documentation updates. "Documentation does not
     mention this feature" is NOT a valid reason to skip documentation - it means the
     documentation is incomplete and MUST be updated.
-- §3: Git operations (branch naming, staging, pre-commit)
+- §3: Git operations (branch naming, staging)
+  - Pre-commit (§3.3) applies ONLY if configured in the project. If no pre-commit config
+    exists (no .pre-commit-config.yaml, not in pyproject.toml), score N/A and skip.
 - §4: Commit messages (atomicity, format)
 - §11: Testing (tests required for new features and fixes)
 
@@ -210,7 +212,10 @@ Key execution guidelines to evaluate:
     fixed as part of this work. Score 1/5 if documentation updates are skipped when they
     should have been included.
 - §3.2: Are files staged explicitly?
-- §3.3: Did pre-commit verification pass?
+- §3.3: Pre-commit verification (ONLY if pre-commit is configured in the project)
+  - If pre-commit is NOT available (not in pyproject.toml, no .pre-commit-config.yaml),
+    score N/A and skip this check entirely. Do not penalize for missing pre-commit.
+  - If pre-commit IS configured and was not run, score 1/5.
 - §4.4: Is the commit atomic (code + tests + documentation together)?
 - §11: Are tests included for new features and fixes?
 

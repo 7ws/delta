@@ -142,9 +142,9 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 3.3 Pre-Commit Verification
 
-- 3.3.1: Run `pre-commit run --all-files` or equivalent before every commit.
-- 3.3.2: Run the full test suite before every commit. Execute `make test` or equivalent.
-- 3.3.3: Run linters before every commit. Execute `make lint` or equivalent.
+- 3.3.1: Run `pre-commit run --all-files` or equivalent before every commit, IF pre-commit is configured in the project. Check for `.pre-commit-config.yaml` or pre-commit in `pyproject.toml` dependencies. If pre-commit is not configured, skip this step.
+- 3.3.2: Run the full test suite before every commit, if a test suite exists. Execute `make test` or equivalent.
+- 3.3.3: Run linters before every commit, if linters are configured. Execute `make lint` or equivalent.
 - 3.3.4: Do not proceed with failing tests or linter errors.
 - 3.3.5: After each commit, verify atomicity by checking out that specific commit and running tests in isolation.
 - 3.3.6: Work is incomplete until committed. Do not declare work complete or ready for review without creating a commit.

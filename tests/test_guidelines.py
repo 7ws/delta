@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from delta.guidelines import find_agents_md, parse_agents_md
+from delta.guidelines import (
+    find_agents_md,
+    load_merged_agents_md,
+    merge_agents_content,
+    parse_agents_md,
+    parse_agents_md_from_content,
+)
 
 
 @pytest.fixture
@@ -222,3 +228,140 @@ class TestFindAgentsMd:
 
         # Then
         assert found is None
+
+
+class TestMergeAgentsContent:
+    """Tests for merging bundled and project AGENTS.md content."""
+
+    def test_given_both_contents_when_merged_then_bundled_comes_first(self) -> None:
+        # Given
+        bundled = "# 1. Bundled Guidelines\n- 1.0.1: Rule one."
+        project = "# 1. Override\n- 1.0.1: Project rule."
+
+        # When
+        merged = merge_agents_content(bundled, project)
+
+        # Then
+        bundled_pos = merged.find("# 1. Bundled Guidelines")
+        project_pos = merged.find("# 1. Override")
+        assert bundled_pos < project_pos
+
+    def test_given_both_contents_when_merged_then_contains_separator(self) -> None:
+        # Given
+        bundled = "# 1. Bundled"
+        project = "# 2. Project"
+
+        # When
+        merged = merge_agents_content(bundled, project)
+
+        # Then
+        assert "Project-Specific Guidelines" in merged
+        assert "take precedence" in merged
+
+    def test_given_both_contents_when_merged_then_contains_both_contents(self) -> None:
+        # Given
+        bundled = "Bundled content here"
+        project = "Project content here"
+
+        # When
+        merged = merge_agents_content(bundled, project)
+
+        # Then
+        assert "Bundled content here" in merged
+        assert "Project content here" in merged
+
+
+class TestParseAgentsMdFromContent:
+    """Tests for parsing AGENTS.md from string content."""
+
+    def test_given_content_string_when_parsed_then_extracts_sections(self) -> None:
+        # Given
+        content = """# 1. Writing Style
+
+## 1.1 Voice
+
+- 1.1.1: Use active voice.
+
+# 2. Technical Conduct
+
+- 2.0.1: Read code first.
+"""
+
+        # When
+        doc = parse_agents_md_from_content(content)
+
+        # Then
+        assert len(doc.major_sections) == 2
+        assert doc.major_sections[0].name == "Writing Style"
+        assert doc.major_sections[1].name == "Technical Conduct"
+
+    def test_given_merged_content_when_parsed_then_includes_project_sections(self) -> None:
+        # Given
+        bundled = """# 1. Bundled Section
+
+- 1.0.1: Bundled rule.
+"""
+        project = """# 2. Project Section
+
+- 2.0.1: Project rule.
+"""
+        merged = merge_agents_content(bundled, project)
+
+        # When
+        doc = parse_agents_md_from_content(merged)
+
+        # Then
+        # Both bundled and project sections should be present
+        section_names = [s.name for s in doc.major_sections]
+        assert "Bundled Section" in section_names
+        assert "Project Section" in section_names
+
+
+class TestLoadMergedAgentsMd:
+    """Tests for load_merged_agents_md function."""
+
+    def test_given_project_agents_md_when_loaded_then_returns_project_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Given
+        project_agents = tmp_path / "AGENTS.md"
+        project_agents.write_text("# 1. Project Rules\n- 1.0.1: Custom rule.")
+        monkeypatch.chdir(tmp_path)
+
+        # When
+        path, _content = load_merged_agents_md(tmp_path)
+
+        # Then
+        assert path == project_agents
+
+    def test_given_project_agents_md_when_loaded_then_content_contains_both(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Given
+        project_agents = tmp_path / "AGENTS.md"
+        project_agents.write_text("# Custom Project Rule")
+        monkeypatch.chdir(tmp_path)
+
+        # When
+        _path, content = load_merged_agents_md(tmp_path)
+
+        # Then
+        # Should contain project content
+        assert "# Custom Project Rule" in content
+        # Should contain bundled content (Writing Style is in bundled AGENTS.md)
+        assert "Writing Style" in content
+
+    def test_given_no_project_agents_md_when_loaded_then_returns_bundled_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Given - tmp_path has no AGENTS.md
+        monkeypatch.chdir(tmp_path)
+
+        # When
+        path, content = load_merged_agents_md(tmp_path)
+
+        # Then
+        # Path should be the bundled path (contains "delta" in path)
+        assert "delta" in str(path)
+        # Content should be bundled only (no project-specific separator)
+        assert "Project-Specific Guidelines" not in content
