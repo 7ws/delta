@@ -340,10 +340,12 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 9.1 General Principles
 
-- 9.1.1: Maximise code reuse. Use framework features to avoid duplication.
-- 9.1.2: Defer custom implementations until requirements prove them necessary.
+- 9.1.1: Maximise code reuse. Use framework features to avoid duplication. Do not duplicate code under any circumstances. If similar logic exists elsewhere in the codebase, extract it into a shared location or reuse the existing implementation.
+- 9.1.2: Defer custom implementations until requirements prove them necessary. When proposing custom code, provide explicit justification that demonstrates: (1) no existing library or framework feature satisfies the requirement, (2) the maintenance burden of custom code is lower than alternatives, and (3) the custom implementation does not duplicate logic that exists elsewhere.
 - 9.1.3: Review proposed changes line by line against existing code and these guidelines before applying.
 - 9.1.4: Avoid redundant configuration, unnecessary exceptions, and deviations from established patterns.
+- 9.1.5: Evaluate maintenance burden before proposing any code change. Ask: "Does this change reduce or increase the long-term cost of maintaining the codebase?" If a lower-burden alternative exists, use it. Factors include: code duplication, coupling between components, deviation from established patterns, and introduction of custom abstractions.
+- 9.1.6: Do not take efficiency shortcuts. Short-term time savings that increase maintenance burden are forbidden. This includes: copying code instead of extracting shared functions, hardcoding values instead of using configuration, bypassing established patterns for expedience, and creating one-off implementations instead of reusable components.
 
 ## 9.2 Dependency Selection
 
