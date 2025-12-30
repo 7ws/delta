@@ -96,6 +96,7 @@ from delta.llm import (
 )
 from delta.plan_widget import PlanTask
 from delta.protocol import (
+    capture_git_state,
     compute_edit_result,
     extract_prompt_content,
     extract_prompt_text,
@@ -163,6 +164,9 @@ class ComplianceState:
     # Write operation tracking - ensures compliance review for ANY writes
     has_write_operations: bool = False
 
+    # Git state for compliance reviews
+    git_state: str = ""
+
     def record_tool_call(self, tool_description: str, allowed: bool) -> None:
         """Record a tool call in the session history."""
         status = "ALLOWED" if allowed else "DENIED"
@@ -178,6 +182,7 @@ class ComplianceState:
         Resets workflow state while preserving tool call history
         for compliance reviewer context. Preserves incomplete tasks
         to ensure follow-up prompts don't lose pending work.
+        Git state is preserved as it reflects the current repository state.
         """
         self.phase = WorkflowPhase.PLANNING
         self.approved_plan = ""
@@ -187,6 +192,7 @@ class ComplianceState:
         self.plan_tasks = [t for t in self.plan_tasks if t.status != "completed"]
         self.current_action = ""
         self.has_write_operations = False
+        # Note: git_state is preserved - it reflects the actual repository state
 
 
 class DeltaAgent(Agent):
@@ -267,9 +273,11 @@ class DeltaAgent(Agent):
         plan: str,
         session_id: str,
     ) -> ComplianceReport:
-        """Review a simple plan with lightweight validation."""
+        """Review a simple plan with lightweight validation including Git state check."""
         handler = self._get_review_handler()
-        report = await handler.review_simple_plan(state.current_user_prompt, plan)
+        report = await handler.review_simple_plan(
+            state.current_user_prompt, plan, git_state=state.git_state
+        )
         state.plan_review_attempts += 1
         return report
 
@@ -992,6 +1000,10 @@ class DeltaAgent(Agent):
         state.reset_for_new_prompt()
         state.current_user_prompt = prompt_text
         state.user_request_history.append(prompt_text)
+
+        # Capture Git state for compliance reviews
+        state.git_state = capture_git_state(state.cwd)
+        logger.debug(f"Git state captured: {state.git_state[:100]}...")
 
         # Check if prompt contains images
         has_images = any(block.get("type") == "image" for block in prompt_content)

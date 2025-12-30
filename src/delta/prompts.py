@@ -48,12 +48,22 @@ standard git operations, running commands. They do not require full guideline ev
 
 {plan}
 
+## Git State
+
+{git_state}
+
 ## Quick Check
 
 Verify these essentials only:
 1. Does the plan address what the user asked for?
 2. Are there obvious safety concerns (data loss, security issues)?
 3. Is the approach reasonable for this type of task?
+4. **Git state compliance** (CRITICAL):
+   - If the working tree is dirty (uncommitted changes) and the plan modifies files,
+     the plan MUST address the Git state (stash changes, commit first, or ask user)
+   - If the user is NOT on main/master branch and the plan creates commits,
+     the plan should acknowledge the current branch or ask the user about branch management
+   - Plans that ignore dirty Git state when modifying files MUST be rejected
 
 Do NOT evaluate:
 - Every guideline in AGENTS.md
@@ -70,10 +80,12 @@ Do NOT evaluate:
 }}
 ```
 
-Set approved=false only if the plan:
+Set approved=false if the plan:
 - Does not address the user's request
 - Has obvious safety concerns
 - Uses a clearly wrong approach
+- Modifies files on a dirty working tree without addressing it
+- Creates commits without acknowledging non-main branch
 """
 
 
@@ -248,19 +260,26 @@ Section checklist:
 """
 
 
-def build_simple_plan_review_prompt(user_prompt: str, plan: str) -> str:
+def build_simple_plan_review_prompt(
+    user_prompt: str,
+    plan: str,
+    git_state: str | None = None,
+) -> str:
     """Build prompt for simple plan review (lightweight validation).
 
     Args:
         user_prompt: The user's request.
         plan: The proposed implementation plan.
+        git_state: Current Git state (branch, working tree status).
 
     Returns:
         Formatted prompt for quick sanity check.
     """
+    git_state_text = git_state or "(Git state not available)"
     return SIMPLE_PLAN_REVIEW_TEMPLATE.format(
         user_prompt=user_prompt,
         plan=plan,
+        git_state=git_state_text,
     )
 
 

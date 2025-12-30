@@ -69,15 +69,18 @@ class ReviewPhaseHandler:
         self,
         user_prompt: str,
         plan: str,
+        git_state: str | None = None,
     ) -> ComplianceReport:
         """Review a simple plan with lightweight validation.
 
         Simple tasks bypass full guideline evaluation and receive only a sanity
-        check for obvious issues.
+        check for obvious issues. Git state is checked to ensure plans do not
+        modify files on dirty working trees without user consent.
 
         Args:
             user_prompt: The user's request.
             plan: The proposed implementation plan.
+            git_state: Current Git state (branch, working tree status).
 
         Returns:
             ComplianceReport with approved/rejected status.
@@ -85,7 +88,7 @@ class ReviewPhaseHandler:
         Raises:
             ParseError: If parsing fails after retries.
         """
-        prompt = build_simple_plan_review_prompt(user_prompt, plan)
+        prompt = build_simple_plan_review_prompt(user_prompt, plan, git_state)
 
         async def llm_call(p: str) -> str:
             return await self._llm_call(

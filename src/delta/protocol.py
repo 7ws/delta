@@ -224,3 +224,99 @@ def format_tool_action(tool_name: str, input_params: dict[str, Any]) -> str:
     # Generic format for unknown tools
     params_str = ", ".join(f"{k}={v!r}" for k, v in input_params.items())
     return f"Call {tool_name}({params_str})"
+
+
+def capture_git_state(cwd: Path | None = None) -> str:
+    """Capture current Git repository state for compliance reviews.
+
+    Runs git commands to capture:
+    - Current branch name
+    - Working tree status (clean/dirty)
+    - List of uncommitted changes
+
+    Args:
+        cwd: Working directory (uses current directory if None).
+
+    Returns:
+        Formatted string describing Git state, or error message if not a git repo.
+    """
+    import subprocess
+
+    work_dir = str(cwd) if cwd else None
+
+    try:
+        # Get current branch
+        branch_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=work_dir,
+            timeout=5,
+        )
+        if branch_result.returncode != 0:
+            return "(Not a git repository)"
+
+        branch = branch_result.stdout.strip()
+
+        # Get working tree status
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=work_dir,
+            timeout=5,
+        )
+
+        if status_result.returncode != 0:
+            return f"Branch: {branch}\nStatus: (Unable to determine)"
+
+        status_output = status_result.stdout.strip()
+
+        if not status_output:
+            return f"Branch: {branch}\nWorking tree: clean"
+
+        # Parse status output to categorize changes
+        staged = []
+        unstaged = []
+        untracked = []
+
+        for line in status_output.split("\n"):
+            if not line:
+                continue
+            index_status = line[0]
+            worktree_status = line[1]
+            file_path = line[3:]
+
+            if index_status == "?":
+                untracked.append(file_path)
+            elif index_status != " ":
+                staged.append(file_path)
+            if worktree_status != " " and worktree_status != "?":
+                unstaged.append(file_path)
+
+        parts = [f"Branch: {branch}", "Working tree: DIRTY (uncommitted changes)"]
+
+        if staged:
+            parts.append(f"Staged files: {', '.join(staged[:5])}")
+            if len(staged) > 5:
+                parts.append(f"  ... and {len(staged) - 5} more")
+
+        if unstaged:
+            parts.append(f"Unstaged changes: {', '.join(unstaged[:5])}")
+            if len(unstaged) > 5:
+                parts.append(f"  ... and {len(unstaged) - 5} more")
+
+        if untracked:
+            parts.append(f"Untracked files: {', '.join(untracked[:5])}")
+            if len(untracked) > 5:
+                parts.append(f"  ... and {len(untracked) - 5} more")
+
+        return "\n".join(parts)
+
+    except subprocess.TimeoutExpired:
+        return "(Git command timed out)"
+    except FileNotFoundError:
+        return "(Git not installed)"
+    except Exception as e:
+        logger.warning(f"Failed to capture git state: {e}")
+        return f"(Error capturing git state: {e})"
