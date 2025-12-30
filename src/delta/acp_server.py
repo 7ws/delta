@@ -81,24 +81,19 @@ from delta.guidelines import (
 )
 from delta.llm import (
     ClaudeCodeClient,
-    InvalidComplexityResponse,
     InvalidPlanParseResponse,
     InvalidReviewReadinessResponse,
     InvalidTaskDuplicateResponse,
-    InvalidTriageResponse,
     InvalidWriteClassificationResponse,
-    classify_task_complexity,
     classify_task_duplicate,
     classify_write_operation,
     detect_task_progress,
-    generate_clarifying_questions,
     get_classify_client,
     get_llm_client,
     is_ready_for_review,
     parse_plan_tasks,
-    triage_user_message,
 )
-from delta.plan_widget import PlanTask, PlanWidgetManager
+from delta.plan_widget import PlanTask
 from delta.protocol import (
     compute_edit_result,
     extract_prompt_content,
@@ -106,8 +101,7 @@ from delta.protocol import (
     format_tool_action,
     read_file_content,
 )
-from delta.review import ParseError, ReviewPhaseHandler
-from delta.tools import ToolPermissionHandler
+from delta.review import ReviewPhaseHandler
 from delta.workflow import WorkflowContext, WorkflowOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -662,7 +656,8 @@ class DeltaAgent(Agent):
                             # Default to write operation if classification fails (safe side)
                             state.has_write_operations = True
                             logger.warning(
-                                f"Write classification failed, treating as write: {tool_description}"
+                                f"Write classification failed, treating as write: "
+                                f"{tool_description}"
                             )
 
                         return PermissionResultAllow(updated_input=input_params)

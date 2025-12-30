@@ -88,7 +88,9 @@ class ReviewPhaseHandler:
         prompt = build_simple_plan_review_prompt(user_prompt, plan)
 
         async def llm_call(p: str) -> str:
-            return await self._llm_call(p, "You are a quick sanity checker. Output only valid JSON.")
+            return await self._llm_call(
+                p, "You are a quick sanity checker. Output only valid JSON."
+            )
 
         try:
             report = await parse_with_retry(
@@ -122,7 +124,9 @@ class ReviewPhaseHandler:
         prompt = build_plan_review_prompt(self._agents_doc, user_prompt, plan)
 
         async def llm_call(p: str) -> str:
-            return await self._llm_call(p, "You are a strict compliance reviewer. Output only valid JSON.")
+            return await self._llm_call(
+                p, "You are a strict compliance reviewer. Output only valid JSON."
+            )
 
         def parser(response: str) -> ComplianceReport:
             return parse_compliance_response(response, self._agents_doc)
@@ -169,7 +173,9 @@ class ReviewPhaseHandler:
         )
 
         async def llm_call(p: str) -> str:
-            return await self._llm_call(p, "You are a strict compliance reviewer. Output only valid JSON.")
+            return await self._llm_call(
+                p, "You are a strict compliance reviewer. Output only valid JSON."
+            )
 
         def parser(response: str) -> ComplianceReport:
             return parse_compliance_response(response, self._agents_doc)

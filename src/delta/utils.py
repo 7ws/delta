@@ -5,9 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
-
-T = TypeVar("T")
+from typing import Any
 
 
 def extract_json(response: str) -> str:
@@ -47,7 +45,7 @@ def extract_json(response: str) -> str:
     raise ValueError("No JSON found in response")
 
 
-def parse_json(response: str) -> dict | list:
+def parse_json(response: str) -> dict[str, Any] | list[Any]:
     """Extract and parse JSON from a response.
 
     Args:
@@ -60,10 +58,11 @@ def parse_json(response: str) -> dict | list:
         ValueError: If no valid JSON found in response.
     """
     json_str = extract_json(response)
-    return json.loads(json_str)
+    result: dict[str, Any] | list[Any] = json.loads(json_str)
+    return result
 
 
-async def parse_with_retry(
+async def parse_with_retry[T](
     llm_call: Callable[[str], Awaitable[str]],
     initial_prompt: str,
     parser: Callable[[str], T],

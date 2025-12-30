@@ -1,10 +1,11 @@
 """Tests for delta.review module."""
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
-from delta.review import ReviewPhaseHandler, ParseError
-from delta.compliance import ComplianceReport, SectionScore
+import pytest
+
+from delta.compliance import ComplianceReport
+from delta.review import ParseError, ReviewPhaseHandler
 
 
 class TestReviewPhaseHandler:
@@ -32,7 +33,9 @@ class TestReviewPhaseHandler:
     @pytest.mark.asyncio
     async def test_review_simple_plan_compliant(self, handler, mock_llm_client):
         """Should return compliant report for approved simple plan."""
-        mock_llm_client.complete.return_value = '```json\n{"approved": true, "reason": "Looks good"}\n```'
+        mock_llm_client.complete.return_value = (
+            '```json\n{"approved": true, "reason": "Looks good"}\n```'
+        )
 
         report = await handler.review_simple_plan("Add a button", "1. Add button to UI")
 
@@ -41,7 +44,9 @@ class TestReviewPhaseHandler:
     @pytest.mark.asyncio
     async def test_review_simple_plan_not_compliant(self, handler, mock_llm_client):
         """Should return non-compliant report for rejected simple plan."""
-        mock_llm_client.complete.return_value = '```json\n{"approved": false, "reason": "Too risky"}\n```'
+        mock_llm_client.complete.return_value = (
+            '```json\n{"approved": false, "reason": "Too risky"}\n```'
+        )
 
         report = await handler.review_simple_plan("Delete everything", "1. rm -rf /")
 

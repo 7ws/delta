@@ -7,13 +7,16 @@ import logging
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from acp import start_tool_call, update_tool_call
+from acp import start_tool_call, tool_diff_content, update_tool_call
 from acp.schema import PermissionOption, ToolCallLocation, ToolCallUpdate
 from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny, ToolPermissionContext
 
-from delta.llm import InvalidWriteClassificationResponse, classify_write_operation, get_classify_client
+from delta.llm import (
+    InvalidWriteClassificationResponse,
+    classify_write_operation,
+    get_classify_client,
+)
 from delta.protocol import compute_edit_result, format_tool_action, read_file_content
-from acp import tool_diff_content
 
 if TYPE_CHECKING:
     from acp.interfaces import Client
@@ -294,7 +297,8 @@ class ToolPermissionHandler:
         self._state.record_tool_call(tool_description, allowed=False)
 
         return PermissionResultDeny(
-            message="Permission prompt was cancelled. Stop and ask for clarification before proceeding.",
+            message="Permission prompt was cancelled. "
+            "Stop and ask for clarification before proceeding.",
             interrupt=True,
         )
 

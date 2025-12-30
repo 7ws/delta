@@ -1,9 +1,10 @@
 """Tests for delta.workflow module."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from delta.workflow import WorkflowContext, WorkflowOrchestrator, TriageResult
+import pytest
+
+from delta.workflow import TriageResult, WorkflowContext, WorkflowOrchestrator
 
 
 class TestWorkflowContext:
@@ -105,9 +106,11 @@ class TestWorkflowOrchestrator:
     @pytest.mark.asyncio
     async def test_triage_plan(self, orchestrator, ctx):
         """Should return needs_planning=True for PLAN triage."""
-        with patch("delta.workflow.triage_user_message", return_value="PLAN"):
-            with patch("delta.workflow.classify_task_complexity", return_value="MODERATE"):
-                result = await orchestrator.triage(ctx)
+        with (
+            patch("delta.workflow.triage_user_message", return_value="PLAN"),
+            patch("delta.workflow.classify_task_complexity", return_value="MODERATE"),
+        ):
+            result = await orchestrator.triage(ctx)
 
         assert result.needs_planning
         assert result.complexity == "MODERATE"
@@ -120,7 +123,9 @@ class TestWorkflowOrchestrator:
         mock_callbacks["call_inner_agent"].assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_handle_direct_answer_with_writes(self, orchestrator, ctx, mock_callbacks, mock_conn):
+    async def test_handle_direct_answer_with_writes(
+        self, orchestrator, ctx, mock_callbacks, mock_conn
+    ):
         """Should trigger review when writes occurred in direct answer."""
         ctx.state.has_write_operations = True
         mock_report = MagicMock()

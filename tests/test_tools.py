@@ -1,7 +1,8 @@
 """Tests for delta.tools module."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 
 class TestToolPermissionHandler:
@@ -34,7 +35,7 @@ class TestToolPermissionHandler:
             session_id="test-session",
         )
 
-        content, locations, kind, title = handler._build_tool_display(
+        _content, locations, kind, title = handler._build_tool_display(
             "Write",
             {"file_path": "/path/to/file.py", "content": "new content"},
             "Write file: /path/to/file.py",
@@ -55,7 +56,7 @@ class TestToolPermissionHandler:
             session_id="test-session",
         )
 
-        content, locations, kind, title = handler._build_tool_display(
+        _content, _locations, kind, title = handler._build_tool_display(
             "Bash",
             {"command": "git status"},
             "Execute shell command: git status",
@@ -75,7 +76,7 @@ class TestToolPermissionHandler:
             session_id="test-session",
         )
 
-        content, locations, kind, title = handler._build_tool_display(
+        _content, locations, kind, _title = handler._build_tool_display(
             "Read",
             {"file_path": "/path/to/file.py"},
             "Read file: /path/to/file.py",
@@ -95,7 +96,7 @@ class TestToolPermissionHandler:
             session_id="test-session",
         )
 
-        content, locations, kind, title = handler._build_tool_display(
+        _content, _locations, kind, title = handler._build_tool_display(
             "Grep",
             {"pattern": "TODO"},
             "Search content matching: TODO",

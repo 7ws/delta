@@ -1,14 +1,10 @@
 """Tests for delta.protocol module."""
 
-import pytest
-from pathlib import Path
-from unittest.mock import patch
 
 from delta.protocol import (
     compute_edit_result,
     format_tool_action,
     read_file_content,
-    read_resource_link,
 )
 
 

@@ -1,8 +1,7 @@
 """Tests for LLM client pool functionality."""
 
-import pytest
 
-from delta.llm import LLMClientPool, ClaudeCodeClient, get_classify_client, get_llm_client
+from delta.llm import ClaudeCodeClient, LLMClientPool, get_classify_client, get_llm_client
 
 
 class TestLLMClientPool:

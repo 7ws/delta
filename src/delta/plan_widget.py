@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from acp import plan_entry, update_plan
 
@@ -98,7 +98,7 @@ class PlanWidgetManager:
 
     async def _filter_duplicates(
         self,
-        classify_client: any,
+        classify_client: Any,
         existing_descriptions: list[str],
         task_descriptions: list[str],
     ) -> list[PlanTask]:
@@ -168,9 +168,14 @@ class PlanWidgetManager:
 
             # Update task statuses
             for idx, new_status in progress.items():
-                if 0 <= idx < len(self.tasks):
-                    if new_status in ("pending", "in_progress", "completed"):
-                        self.tasks[idx].status = new_status
+                if 0 <= idx < len(self.tasks) and new_status in (
+                    "pending",
+                    "in_progress",
+                    "completed",
+                ):
+                    self.tasks[idx].status = cast(
+                        Literal["pending", "in_progress", "completed"], new_status
+                    )
 
             # Send updated plan to UI
             await self.send_update()

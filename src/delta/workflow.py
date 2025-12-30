@@ -69,15 +69,16 @@ class WorkflowOrchestrator:
         self,
         conn: Client,
         classify_model: str = "haiku",
-        call_inner_agent: Callable[..., Coroutine[Any, Any, str]] | None = None,
-        call_inner_agent_silent: Callable[..., Coroutine[Any, Any, str]] | None = None,
-        review_simple_plan: Callable[..., Coroutine[Any, Any, ComplianceReport]] | None = None,
-        review_plan: Callable[..., Coroutine[Any, Any, ComplianceReport]] | None = None,
-        review_work: Callable[..., Coroutine[Any, Any, ComplianceReport]] | None = None,
-        check_ready_for_review: Callable[..., Coroutine[Any, Any, bool]] | None = None,
-        parse_and_send_plan: Callable[..., Coroutine[Any, Any, None]] | None = None,
-        send_plan_update: Callable[..., Coroutine[Any, Any, None]] | None = None,
-        update_task_progress: Callable[..., Coroutine[Any, Any, None]] | None = None,
+        *,
+        call_inner_agent: Callable[..., Coroutine[Any, Any, str]],
+        call_inner_agent_silent: Callable[..., Coroutine[Any, Any, str]],
+        review_simple_plan: Callable[..., Coroutine[Any, Any, ComplianceReport]],
+        review_plan: Callable[..., Coroutine[Any, Any, ComplianceReport]],
+        review_work: Callable[..., Coroutine[Any, Any, ComplianceReport]],
+        check_ready_for_review: Callable[..., Coroutine[Any, Any, bool]],
+        parse_and_send_plan: Callable[..., Coroutine[Any, Any, None]],
+        send_plan_update: Callable[..., Coroutine[Any, Any, None]],
+        update_task_progress: Callable[..., Coroutine[Any, Any, None]],
     ) -> None:
         """Initialize the workflow orchestrator.
 
@@ -231,7 +232,7 @@ class WorkflowOrchestrator:
         self,
         ctx: WorkflowContext,
         complexity: str,
-        workflow_phase_enum: type,
+        workflow_phase_enum: type[WorkflowPhase],
     ) -> bool:
         """Handle planning phase: Create and review implementation plan.
 
@@ -413,13 +414,12 @@ RULES:
 
     def _get_planning_title(self, attempt: int) -> str:
         """Get user-friendly planning title based on attempt number."""
-        if attempt == 1:
-            return "Analyzing request"
-        elif attempt == 2:
-            return "Refining approach"
-        elif attempt == 3:
-            return "Revising solution"
-        return "Finalizing plan"
+        titles = {
+            1: "Analyzing request",
+            2: "Refining approach",
+            3: "Revising solution",
+        }
+        return titles.get(attempt, "Finalizing plan")
 
     def _log_violations(self, report: ComplianceReport) -> None:
         """Log plan violations for debugging."""
@@ -514,7 +514,7 @@ Provide your revised YAML plan now:
     async def handle_execution(
         self,
         ctx: WorkflowContext,
-        workflow_phase_enum: type,
+        workflow_phase_enum: type[WorkflowPhase],
     ) -> None:
         """Handle execution phase: Implement the approved plan.
 
@@ -539,7 +539,7 @@ Provide your revised YAML plan now:
     async def handle_review_cycle(
         self,
         ctx: WorkflowContext,
-        workflow_phase_enum: type,
+        workflow_phase_enum: type[WorkflowPhase],
     ) -> None:
         """Handle review cycle: Check compliance and request revisions.
 

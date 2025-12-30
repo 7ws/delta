@@ -61,5 +61,5 @@ class TestParseJson:
     def test_raises_on_invalid_json(self):
         """Should raise ValueError on invalid JSON."""
         response = '```json\n{invalid json}\n```'
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             parse_json(response)

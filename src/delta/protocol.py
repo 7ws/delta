@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -206,7 +207,7 @@ def format_tool_action(tool_name: str, input_params: dict[str, Any]) -> str:
     Returns:
         Action description in imperative form for compliance review.
     """
-    tool_formats = {
+    tool_formats: dict[tuple[str, ...], Callable[[dict[str, Any]], str]] = {
         ("Bash", "mcp__acp__Bash"): lambda p: f"Execute shell command: {p.get('command', '')}",
         ("Write", "mcp__acp__Write"): lambda p: f"Write file: {p.get('file_path', '')}",
         ("Edit", "mcp__acp__Edit"): lambda p: f"Edit file: {p.get('file_path', '')}",

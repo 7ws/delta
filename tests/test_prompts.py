@@ -1,13 +1,12 @@
 """Tests for delta.prompts module."""
 
-import pytest
 from unittest.mock import MagicMock
 
 from delta.prompts import (
     PromptTemplate,
-    build_simple_plan_review_prompt,
-    build_plan_review_prompt,
     build_batch_work_review_prompt,
+    build_plan_review_prompt,
+    build_simple_plan_review_prompt,
 )
 
 
