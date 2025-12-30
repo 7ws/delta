@@ -457,6 +457,7 @@ def generate_clarifying_questions(
     user_request: str,
     violations: list[str],
     max_retries: int = 2,
+    conversation_context: str | None = None,
 ) -> list[str]:
     """Generate specific questions to resolve compliance violations.
 
@@ -465,30 +466,54 @@ def generate_clarifying_questions(
         user_request: The original user request.
         violations: List of guideline violations with justifications.
         max_retries: Maximum retry attempts for invalid responses.
+        conversation_context: Recent conversation history (tool calls, prior requests).
 
     Returns:
-        List of questions (without numbers).
+        List of questions (without numbers). Returns empty list if context
+        provides sufficient information to infer the user's intent.
     """
     violations_text = "\n".join(violations)
+
+    context_section = ""
+    if conversation_context:
+        context_section = f"""
+CONVERSATION CONTEXT (recent actions and prior requests):
+{conversation_context}
+
+CRITICAL: If the conversation context shows recent completed work (commits, test runs,
+file changes) that relates to the user's request, the user likely wants a STATUS UPDATE
+or NEXT STEPS, not a new implementation. In this case, return an empty JSON array []
+to indicate that no clarifying questions are needed - the agent should infer intent
+from context and provide a summary of completed work or suggest next steps.
+
+"""
 
     prompt = dedent(f"""\
         Generate specific questions to resolve these compliance violations.
 
         USER REQUEST:
         {user_request}
-
+{context_section}
         VIOLATIONS (guidelines the plan failed):
         {violations_text}
 
-        Generate 2-4 specific questions that, when answered by the user, would
-        provide the information needed to create a compliant plan.
+        INSTRUCTIONS:
+        1. First, check if the conversation context provides enough information to
+           understand what the user wants. If recent actions (commits, tests, file
+           changes) clearly relate to an ambiguous request like "what's missing?" or
+           "give me an update", return an empty array [] - the agent should summarize
+           the recent work instead of asking questions.
 
-        Each question should:
-        - Target a specific violation
-        - Ask for concrete information (not yes/no)
-        - Help clarify scope, requirements, or constraints
+        2. Only generate questions if the request is truly ambiguous AND the context
+           does not provide sufficient clues about the user's intent.
+
+        3. If questions are needed, generate 2-4 specific questions that:
+           - Target a specific violation
+           - Ask for concrete information (not yes/no)
+           - Help clarify scope, requirements, or constraints
 
         Return a JSON array of question strings.
+        Return [] if context is sufficient to infer intent.
         Example: ["Where should the new component be placed?", "What validation rules apply?"]
 
         Return ONLY the JSON array, no other text.\

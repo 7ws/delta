@@ -445,7 +445,10 @@ RULES:
         )
         await self._conn.session_update(session_id=ctx.session_id, update=planning_update)
 
-        # Generate clarifying questions
+        # Build conversation context from session state
+        conversation_context = self._build_conversation_context(ctx)
+
+        # Generate clarifying questions (may return empty if context is sufficient)
         violations_for_questions = [
             f"{g.guideline_id}: {g.justification}"
             for section in report.failing_sections
@@ -457,12 +460,84 @@ RULES:
             classify_client,
             ctx.prompt_text,
             violations_for_questions,
+            conversation_context=conversation_context,
         )
+
+        # If no questions needed, context provides sufficient information
+        # The inner agent should infer intent and provide a status update
+        if not questions:
+            logger.info("Context sufficient - inferring intent instead of asking questions")
+            infer_prompt = self._build_context_inference_prompt(ctx)
+            await self._call_inner_agent(ctx.state, infer_prompt, ctx.session_id)
+            return
 
         numbered_questions = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
         escalate_msg = f"\n\n**Additional information required:**\n\n{numbered_questions}\n"
         chunk = update_agent_message(text_block(escalate_msg))
         await self._conn.session_update(session_id=ctx.session_id, update=chunk)
+
+    def _build_conversation_context(self, ctx: WorkflowContext) -> str:
+        """Build conversation context string from session state.
+
+        Args:
+            ctx: Workflow context with state containing history.
+
+        Returns:
+            Formatted string with recent tool calls and prior user requests.
+        """
+        parts = []
+
+        # Include recent tool call history (last 20 actions)
+        if ctx.state.tool_call_history:
+            recent_tools = ctx.state.tool_call_history[-20:]
+            parts.append("Recent actions:")
+            parts.extend(f"  - {action}" for action in recent_tools)
+
+        # Include prior user requests in this session
+        if ctx.state.user_request_history and len(ctx.state.user_request_history) > 1:
+            prior_requests = ctx.state.user_request_history[:-1][-5:]  # Last 5 prior requests
+            parts.append("\nPrior requests in this session:")
+            for i, req in enumerate(prior_requests, 1):
+                # Truncate long requests
+                truncated = req[:200] + "..." if len(req) > 200 else req
+                parts.append(f"  {i}. {truncated}")
+
+        return "\n".join(parts) if parts else ""
+
+    def _build_context_inference_prompt(self, ctx: WorkflowContext) -> str:
+        """Build prompt for inferring intent from conversation context.
+
+        Used when the conversation context provides sufficient information
+        to understand the user's intent without asking clarifying questions.
+
+        Args:
+            ctx: Workflow context with state containing history.
+
+        Returns:
+            Prompt instructing the inner agent to infer intent and respond.
+        """
+        context = self._build_conversation_context(ctx)
+
+        return f"""\
+The user's request was ambiguous, but the conversation context provides sufficient
+information to understand their intent. Infer what the user wants based on the
+recent actions and provide an appropriate response.
+
+USER REQUEST:
+{ctx.prompt_text}
+
+CONVERSATION CONTEXT:
+{context}
+
+INSTRUCTIONS:
+1. Review the recent actions to understand what work was just completed
+2. Infer what the user likely wants (status update, next steps, summary, etc.)
+3. Provide a helpful response that addresses their implicit question
+4. If recent work was completed (commits, tests, file changes), summarize what was done
+5. If there are logical next steps, suggest them
+
+Respond directly to the user based on the context. Do not ask clarifying questions.
+"""
 
     async def _request_plan_revision(
         self,

@@ -455,6 +455,20 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 13.1.3: AI-based classification ensures flexibility, maintainability, and consistency across edge cases that patterns cannot anticipate.
 - 13.1.4: When AI classification fails, default to the safer option (for example, treat uncertain operations as writes requiring review).
 
+## 13.2 Context Inference
+
+- 13.2.1: When a user request is ambiguous, check conversation context (recent tool calls, prior requests) before asking clarifying questions.
+- 13.2.2: If context provides sufficient information to infer intent (for example, recent commits suggest a status update request), respond based on that inference.
+- 13.2.3: Only ask clarifying questions when context is truly insufficient to determine user intent.
+
+### References
+
+Context engineering resources for AI agents:
+
+- [Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) - Anthropic engineering blog on context window management
+- [Context Engineering Guide](https://www.promptingguide.ai/guides/context-engineering-guide) - Structured inputs, tool definitions, and memory management
+- [Context Engineering Best Practices](https://www.kubiya.ai/blog/context-engineering-best-practices) - Strategies for writing, selecting, compressing, and isolating context
+
 
 ---
 
