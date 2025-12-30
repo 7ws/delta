@@ -390,8 +390,8 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 11.1 General Principles
 
-- 11.1.1: New features require tests in the same commit.
-- 11.1.2: Bug fixes require regression tests in the same commit.
+- 11.1.1: New features require tests in the same commit when the feature contains testable logic. Changes that do not require tests include: infrastructure configuration, CSS styling, static assets, environment-specific configuration, and presentation-only changes.
+- 11.1.2: Bug fixes require regression tests in the same commit when the fix involves logic. Configuration fixes, styling corrections, and environment adjustments do not require tests.
 - 11.1.3: Tests document expected behaviour. Write them to be readable.
 
 ## 11.2 Test Structure
