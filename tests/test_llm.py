@@ -12,7 +12,6 @@ from delta.llm import (
     classify_task_complexity,
     classify_task_duplicate,
     classify_write_operation,
-    interpret_for_user,
 )
 
 
@@ -62,62 +61,6 @@ class TestClassifyTaskComplexity:
         # When/Then
         with pytest.raises(InvalidComplexityResponse):
             classify_task_complexity(client, "Do something", max_retries=2)
-
-
-class TestInterpretForUser:
-    """Tests for inner agent output interpretation."""
-
-    def test_given_suppress_response_when_interpreted_then_returns_none(self) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "SUPPRESS"
-
-        # When
-        result = interpret_for_user(client, "The user chose to skip", "executing")
-
-        # Then
-        assert result is None
-
-    def test_given_useful_text_when_interpreted_then_returns_rewritten(self) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "Creating the mobile layout component..."
-
-        # When
-        result = interpret_for_user(client, "I am creating the component", "executing")
-
-        # Then
-        assert result == "Creating the mobile layout component..."
-
-    @pytest.mark.parametrize("response", ["", "   \n  "])
-    def test_given_empty_or_whitespace_response_when_interpreted_then_returns_none(
-        self, response: str
-    ) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = response
-
-        # When
-        result = interpret_for_user(client, "Some text", "planning")
-
-        # Then
-        assert result is None
-
-    @pytest.mark.parametrize(
-        "text",
-        ["The inner agent completed", "workflow phase transition"],
-    )
-    def test_given_internal_reference_when_interpreted_then_suppressed(
-        self, text: str
-    ) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-
-        # When
-        result = interpret_for_user(client, text, "executing")
-
-        # Then
-        assert result is None
 
 
 class TestClassifyWriteOperation:

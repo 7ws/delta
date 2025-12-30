@@ -8,7 +8,6 @@ from delta.compliance import (
     ComplianceReport,
     Score,
     SectionScore,
-    build_compliance_prompt,
     build_simple_plan_review_prompt,
     parse_compliance_response,
     parse_simple_plan_response,
@@ -162,25 +161,6 @@ class TestParseComplianceResponse:
         assert not report.is_compliant
         for section in report.section_scores:
             assert not section.is_passing
-
-
-class TestBuildCompliancePrompt:
-    """Tests for compliance prompt generation."""
-
-    def test_given_agents_doc_when_prompt_built_then_includes_section_checklist(
-        self, sample_agents_md: Path
-    ) -> None:
-        # Given
-        doc = parse_agents_md(sample_agents_md)
-
-        # When
-        prompt = build_compliance_prompt(doc, "Test action")
-
-        # Then
-        assert "§1 Writing Style" in prompt
-        assert "§2 Technical Conduct" in prompt
-        assert "§3 Git Operations" in prompt
-        assert "Section checklist:" in prompt
 
 
 class TestComplianceReportFormat:

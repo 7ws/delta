@@ -35,7 +35,6 @@ from acp.schema import (
     AgentCapabilities,
     AudioContentBlock,
     AuthenticateResponse,
-    BlobResourceContents,
     ClientCapabilities,
     EmbeddedResourceContentBlock,
     HttpMcpServer,
@@ -51,7 +50,6 @@ from acp.schema import (
     SetSessionModeResponse,
     SseMcpServer,
     TextContentBlock,
-    TextResourceContents,
     ToolCallLocation,
     ToolCallUpdate,
 )
@@ -71,18 +69,10 @@ from claude_agent_sdk import (
     SubagentStopHookInput,
     TextBlock,
     ToolPermissionContext,
-    ToolUseBlock,
     UserPromptSubmitHookInput,
 )
 
-from delta.compliance import (
-    ComplianceReport,
-    build_batch_work_review_prompt,
-    build_plan_review_prompt,
-    build_simple_plan_review_prompt,
-    parse_compliance_response,
-    parse_simple_plan_response,
-)
+from delta.compliance import ComplianceReport
 from delta.guidelines import (
     AgentsDocument,
     find_agents_md,
@@ -108,46 +98,22 @@ from delta.llm import (
     parse_plan_tasks,
     triage_user_message,
 )
+from delta.plan_widget import PlanTask, PlanWidgetManager
+from delta.protocol import (
+    compute_edit_result,
+    extract_prompt_content,
+    extract_prompt_text,
+    format_tool_action,
+    read_file_content,
+)
+from delta.review import ParseError, ReviewPhaseHandler
+from delta.tools import ToolPermissionHandler
+from delta.workflow import WorkflowContext, WorkflowOrchestrator
 
 logger = logging.getLogger(__name__)
 
 
-def _read_file_content(file_path: str) -> str | None:
-    """Read current file content, or None if file doesn't exist."""
-    try:
-        path = Path(file_path)
-        if path.exists():
-            return path.read_text()
-        return None
-    except (OSError, UnicodeDecodeError) as e:
-        logger.warning(f"Failed to read file {file_path}: {e}")
-        return None
-
-
-def _compute_edit_result(
-    old_content: str | None,
-    old_string: str,
-    new_string: str,
-    replace_all: bool = False,
-) -> str | None:
-    """Compute the result of an Edit operation.
-
-    Returns the new file content after applying the replacement,
-    or None if the old_string was not found.
-    """
-    if old_content is None:
-        return None
-
-    if replace_all:
-        if old_string not in old_content:
-            return None
-        return old_content.replace(old_string, new_string)
-    else:
-        if old_string not in old_content:
-            return None
-        return old_content.replace(old_string, new_string, 1)
-
-
+# Type alias for prompt blocks
 PromptBlock = (
     TextContentBlock
     | ImageContentBlock
@@ -157,127 +123,6 @@ PromptBlock = (
 )
 
 
-def _extract_prompt_content(
-    blocks: list[PromptBlock], cwd: Path | None = None
-) -> list[dict[str, Any]]:
-    """Extract content blocks from prompt for Claude API.
-
-    Converts ACP prompt blocks to Claude API content format, supporting
-    text, images, and embedded resources.
-
-    Returns:
-        List of Claude API content blocks (text and image types).
-    """
-    content: list[dict[str, Any]] = []
-    text_parts: list[str] = []
-
-    def flush_text() -> None:
-        """Add accumulated text as a content block."""
-        if text_parts:
-            content.append({"type": "text", "text": "\n\n".join(text_parts)})
-            text_parts.clear()
-
-    for block in blocks:
-        if isinstance(block, dict):
-            # Handle dict-style blocks
-            block_type = block.get("type")
-            if block_type == "text":
-                text_parts.append(block.get("text", ""))
-            elif block_type == "image":
-                flush_text()
-                content.append(
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": block.get(
-                                "mimeType", block.get("mime_type", "image/png")
-                            ),
-                            "data": block.get("data", ""),
-                        },
-                    }
-                )
-            elif block_type == "resource":
-                resource = block.get("resource", {})
-                uri = resource.get("uri", "")
-                text = resource.get("text")
-                if text:
-                    text_parts.append(f'<file uri="{uri}">\n{text}\n</file>')
-            elif block_type == "resource_link":
-                uri = block.get("uri", "")
-                name = block.get("name", uri)
-                file_content = _read_resource_link(uri, cwd)
-                if file_content:
-                    text_parts.append(f'<file uri="{uri}" name="{name}">\n{file_content}\n</file>')
-                else:
-                    text_parts.append(f"[Referenced file: {name} ({uri})]")
-        elif isinstance(block, ImageContentBlock):
-            flush_text()
-            content.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": block.mime_type,
-                        "data": block.data,
-                    },
-                }
-            )
-        elif isinstance(block, TextContentBlock):
-            text_parts.append(block.text)
-        elif isinstance(block, EmbeddedResourceContentBlock):
-            resource = block.resource
-            if isinstance(resource, TextResourceContents):
-                text_parts.append(f'<file uri="{resource.uri}">\n{resource.text}\n</file>')
-            elif isinstance(resource, BlobResourceContents):
-                text_parts.append(f"[Binary file: {resource.uri}]")
-        elif isinstance(block, ResourceContentBlock):
-            file_content = _read_resource_link(block.uri, cwd)
-            if file_content:
-                text_parts.append(
-                    f'<file uri="{block.uri}" name="{block.name}">\n{file_content}\n</file>'
-                )
-            else:
-                text_parts.append(f"[Referenced file: {block.name} ({block.uri})]")
-        elif hasattr(block, "text"):
-            text_parts.append(str(getattr(block, "text", "")))
-
-    flush_text()
-    return content
-
-
-def _extract_prompt_text(blocks: list[PromptBlock], cwd: Path | None = None) -> str:
-    """Extract text content from prompt blocks.
-
-    Handles text blocks, embedded resources, and resource links.
-    Returns only the text portion, ignoring images.
-    """
-    content = _extract_prompt_content(blocks, cwd)
-    text_parts = [block["text"] for block in content if block.get("type") == "text"]
-    return "\n\n".join(text_parts)
-
-
-def _read_resource_link(uri: str, cwd: Path | None = None) -> str | None:
-    """Read content from a resource link URI.
-
-    Supports file:// URIs and relative paths.
-    """
-    if uri.startswith("file://"):
-        file_path = Path(uri[7:])
-    elif not uri.startswith(("http://", "https://")):
-        file_path = Path(uri)
-        if cwd and not file_path.is_absolute():
-            file_path = cwd / file_path
-    else:
-        return None
-
-    try:
-        return file_path.read_text()
-    except (OSError, UnicodeDecodeError):
-        logger.warning(f"Failed to read resource: {uri}")
-        return None
-
-
 class WorkflowPhase(Enum):
     """Current phase of the workflow."""
 
@@ -285,14 +130,6 @@ class WorkflowPhase(Enum):
     EXECUTING = "executing"
     REVIEWING = "reviewing"
     COMPLETE = "complete"
-
-
-@dataclass
-class PlanTask:
-    """A single task from the approved plan."""
-
-    content: str
-    status: Literal["pending", "in_progress", "completed"] = "pending"
 
 
 @dataclass
@@ -393,42 +230,6 @@ class DeltaAgent(Agent):
             self.sessions[session_id] = ComplianceState()
         return self.sessions[session_id]
 
-    def _format_tool_action(self, tool_name: str, input_params: dict[str, Any]) -> str:
-        """Format a tool call as a human-readable action description.
-
-        Args:
-            tool_name: Name of the tool being called.
-            input_params: Parameters passed to the tool.
-
-        Returns:
-            Action description in imperative form for compliance review.
-        """
-        if tool_name in ("Bash", "mcp__acp__Bash"):
-            command = input_params.get("command", "")
-            return f"Execute shell command: {command}"
-        elif tool_name in ("Write", "mcp__acp__Write"):
-            file_path = input_params.get("file_path", "")
-            return f"Write file: {file_path}"
-        elif tool_name in ("Edit", "mcp__acp__Edit"):
-            file_path = input_params.get("file_path", "")
-            return f"Edit file: {file_path}"
-        elif tool_name in ("Read", "mcp__acp__Read"):
-            file_path = input_params.get("file_path", "")
-            return f"Read file: {file_path}"
-        elif tool_name == "Glob":
-            pattern = input_params.get("pattern", "")
-            return f"Search files matching: {pattern}"
-        elif tool_name == "Grep":
-            pattern = input_params.get("pattern", "")
-            return f"Search content matching: {pattern}"
-        elif tool_name == "WebFetch":
-            url = input_params.get("url", "")
-            return f"Fetch URL: {url}"
-        else:
-            # Generic format for unknown tools
-            params_str = ", ".join(f"{k}={v!r}" for k, v in input_params.items())
-            return f"Call {tool_name}({params_str})"
-
     def _load_agents_md(self, cwd: Path | None = None) -> None:
         """Load or reload AGENTS.md.
 
@@ -450,64 +251,24 @@ class DeltaAgent(Agent):
                     )
         self.agents_doc = parse_agents_md(self.agents_md_path)
 
+    def _get_review_handler(self) -> ReviewPhaseHandler:
+        """Get or create the review handler with current agents_doc."""
+        self._load_agents_md()
+        if self.agents_doc is None:
+            raise RuntimeError("Failed to load AGENTS.md")
+        return ReviewPhaseHandler(self.llm_client, self.agents_doc)
+
     async def _review_simple_plan(
         self,
         state: ComplianceState,
         plan: str,
         session_id: str,
     ) -> ComplianceReport:
-        """Review a simple plan with lightweight validation.
-
-        Simple tasks bypass full guideline evaluation and receive only a sanity
-        check for obvious issues.
-
-        Args:
-            state: Compliance state for the session.
-            plan: The proposed implementation plan.
-            session_id: ACP session identifier.
-
-        Returns:
-            ComplianceReport with approved/rejected status.
-        """
-        prompt = build_simple_plan_review_prompt(
-            state.current_user_prompt,
-            plan,
-        )
-
-        max_parse_retries = 3
-        last_error: Exception | None = None
-
-        for parse_attempt in range(max_parse_retries):
-            response = await asyncio.to_thread(
-                self.llm_client.complete,
-                prompt=prompt,
-                system="You are a quick sanity checker. Output only valid JSON.",
-            )
-
-            try:
-                report = parse_simple_plan_response(response)
-                state.plan_review_attempts += 1
-
-                logger.info(
-                    f"Simple plan review attempt {state.plan_review_attempts}: "
-                    f"compliant={report.is_compliant}"
-                )
-
-                return report
-            except (ValueError, KeyError) as e:
-                last_error = e
-                logger.warning(
-                    f"JSON parse error on attempt {parse_attempt + 1}/{max_parse_retries}: {e}"
-                )
-                prompt = (
-                    f"Your previous response had invalid JSON. "
-                    f"You MUST output valid JSON only.\n\n{prompt}"
-                )
-
-        raise RuntimeError(
-            f"Failed to parse simple plan response after {max_parse_retries} attempts: "
-            f"{last_error}"
-        )
+        """Review a simple plan with lightweight validation."""
+        handler = self._get_review_handler()
+        report = await handler.review_simple_plan(state.current_user_prompt, plan)
+        state.plan_review_attempts += 1
+        return report
 
     async def _review_plan(
         self,
@@ -515,64 +276,11 @@ class DeltaAgent(Agent):
         plan: str,
         session_id: str,
     ) -> ComplianceReport:
-        """Review a plan for compliance before execution.
-
-        Args:
-            state: Compliance state for the session.
-            plan: The proposed implementation plan.
-            session_id: ACP session identifier.
-
-        Returns:
-            ComplianceReport with scores and revision guidance.
-        """
-        self._load_agents_md()
-
-        if self.agents_doc is None:
-            raise RuntimeError("Failed to load AGENTS.md")
-
-        prompt = build_plan_review_prompt(
-            self.agents_doc,
-            state.current_user_prompt,
-            plan,
-        )
-
-        # Retry up to 3 times on JSON parse failures
-        max_parse_retries = 3
-        last_error: Exception | None = None
-
-        for parse_attempt in range(max_parse_retries):
-            response = await asyncio.to_thread(
-                self.llm_client.complete,
-                prompt=prompt,
-                system="You are a strict compliance reviewer. Output only valid JSON.",
-            )
-
-            try:
-                report = parse_compliance_response(response, self.agents_doc)
-                state.plan_review_attempts += 1
-
-                logger.info(
-                    f"Plan review attempt {state.plan_review_attempts}: "
-                    f"compliant={report.is_compliant}"
-                )
-
-                return report
-            except (ValueError, KeyError) as e:
-                last_error = e
-                logger.warning(
-                    f"JSON parse error on attempt {parse_attempt + 1}/{max_parse_retries}: {e}"
-                )
-                # Modify prompt to emphasize JSON format
-                prompt = (
-                    f"Your previous response had invalid JSON. "
-                    f"You MUST output valid JSON only.\n\n{prompt}"
-                )
-
-        # All retries failed - raise the last error
-        raise RuntimeError(
-            f"Failed to parse compliance response after {max_parse_retries} attempts: "
-            f"{last_error}"
-        )
+        """Review a plan for compliance before execution."""
+        handler = self._get_review_handler()
+        report = await handler.review_plan(state.current_user_prompt, plan)
+        state.plan_review_attempts += 1
+        return report
 
     async def _review_work(
         self,
@@ -580,57 +288,13 @@ class DeltaAgent(Agent):
         work_summary: str,
         session_id: str,
     ) -> ComplianceReport:
-        """Review accumulated work for compliance.
-
-        Args:
-            state: Compliance state for the session.
-            work_summary: Summary of work completed by the inner agent.
-            session_id: ACP session identifier.
-
-        Returns:
-            ComplianceReport with scores and revision guidance.
-        """
-        self._load_agents_md()
-
-        if self.agents_doc is None:
-            raise RuntimeError("Failed to load AGENTS.md")
-
-        prompt = build_batch_work_review_prompt(
-            self.agents_doc,
+        """Review accumulated work for compliance."""
+        handler = self._get_review_handler()
+        return await handler.review_work(
             state.current_user_prompt,
             state.approved_plan,
             work_summary,
             state.tool_call_history,
-        )
-
-        # Retry up to 3 times on JSON parse failures
-        max_parse_retries = 3
-        last_error: Exception | None = None
-
-        for parse_attempt in range(max_parse_retries):
-            response = await asyncio.to_thread(
-                self.llm_client.complete,
-                prompt=prompt,
-                system="You are a strict compliance reviewer. Output only valid JSON.",
-            )
-
-            try:
-                report = parse_compliance_response(response, self.agents_doc)
-                logger.info(f"Work review: compliant={report.is_compliant}")
-                return report
-            except (ValueError, KeyError) as e:
-                last_error = e
-                logger.warning(
-                    f"JSON parse error on attempt {parse_attempt + 1}/{max_parse_retries}: {e}"
-                )
-                prompt = (
-                    f"Your previous response had invalid JSON. "
-                    f"You MUST output valid JSON only.\n\n{prompt}"
-                )
-
-        raise RuntimeError(
-            f"Failed to parse compliance response after {max_parse_retries} attempts: "
-            f"{last_error}"
         )
 
     async def _check_ready_for_review(
@@ -841,7 +505,7 @@ class DeltaAgent(Agent):
                 Returns:
                     PermissionResultAllow or PermissionResultDeny from claude_agent_sdk.
                 """
-                tool_description = self._format_tool_action(tool_name, input_params)
+                tool_description = format_tool_action(tool_name, input_params)
                 logger.info(f"Tool call: {tool_name} - {tool_description}")
 
                 tool_call_id = f"tool_{uuid4().hex[:8]}"
@@ -869,7 +533,7 @@ class DeltaAgent(Agent):
                 if tool_name in ("Write", "mcp__acp__Write"):
                     file_path = input_params.get("file_path", "")
                     new_text = input_params.get("content", "")
-                    old_text = _read_file_content(file_path)
+                    old_text = read_file_content(file_path)
                     tool_content = [tool_diff_content(file_path, new_text, old_text)]
                     tool_locations = [ToolCallLocation(path=file_path)]
                     tool_kind = "edit"
@@ -880,8 +544,8 @@ class DeltaAgent(Agent):
                     old_string = input_params.get("old_string", "")
                     new_string = input_params.get("new_string", "")
                     replace_all = input_params.get("replace_all", False)
-                    old_text = _read_file_content(file_path)
-                    new_text = _compute_edit_result(old_text, old_string, new_string, replace_all)
+                    old_text = read_file_content(file_path)
+                    new_text = compute_edit_result(old_text, old_string, new_string, replace_all)
                     if new_text is not None:
                         tool_content = [tool_diff_content(file_path, new_text, old_text)]
                     tool_locations = [ToolCallLocation(path=file_path)]
@@ -1066,7 +730,7 @@ class DeltaAgent(Agent):
                 pre_tool_input: PreToolUseHookInput = hook_input  # type: ignore[assignment]
                 tool_name = pre_tool_input["tool_name"]
                 tool_input = pre_tool_input["tool_input"]
-                tool_description = self._format_tool_action(tool_name, tool_input)
+                tool_description = format_tool_action(tool_name, tool_input)
 
                 # Record in history (allowed=True since this hook doesn't block)
                 # For tools that go through can_use_tool, the history will be
@@ -1278,6 +942,22 @@ class DeltaAgent(Agent):
         """Handle authentication."""
         return None
 
+    def _get_workflow_orchestrator(self, session_id: str) -> WorkflowOrchestrator:
+        """Create a workflow orchestrator with callbacks to this agent."""
+        return WorkflowOrchestrator(
+            conn=self._conn,
+            classify_model=self.classify_model,
+            call_inner_agent=self._call_inner_agent,
+            call_inner_agent_silent=self._call_inner_agent_silent,
+            review_simple_plan=self._review_simple_plan,
+            review_plan=self._review_plan,
+            review_work=self._review_work,
+            check_ready_for_review=self._check_ready_for_review,
+            parse_and_send_plan=self._parse_and_send_plan,
+            send_plan_update=self._send_plan_update,
+            update_task_progress=self._update_task_progress,
+        )
+
     async def prompt(
         self,
         prompt: list[PromptBlock],
@@ -1296,8 +976,8 @@ class DeltaAgent(Agent):
         state = self._get_state(session_id)
 
         # Extract structured content (supports images)
-        prompt_content = _extract_prompt_content(prompt, cwd=state.cwd)
-        prompt_text = _extract_prompt_text(prompt, cwd=state.cwd)
+        prompt_content = extract_prompt_content(prompt, cwd=state.cwd)
+        prompt_text = extract_prompt_text(prompt, cwd=state.cwd)
 
         if not prompt_text.strip():
             chunk = update_agent_message(text_block("Error: Empty prompt"))
@@ -1312,418 +992,41 @@ class DeltaAgent(Agent):
         # Check if prompt contains images
         has_images = any(block.get("type") == "image" for block in prompt_content)
 
+        # Create workflow context
+        ctx = WorkflowContext(
+            prompt_text=prompt_text,
+            prompt_content=prompt_content,
+            has_images=has_images,
+            session_id=session_id,
+            state=state,
+        )
+
+        # Create orchestrator with callbacks
+        orchestrator = self._get_workflow_orchestrator(session_id)
+
         try:
             # === TRIAGE: Determine if planning is needed ===
-            classify_client = get_classify_client(self.classify_model)
-            try:
-                triage_result = await asyncio.to_thread(
-                    triage_user_message,
-                    classify_client,
-                    prompt_text,
-                )
-            except InvalidTriageResponse:
-                # Default to planning if triage fails
-                triage_result = "PLAN"
+            triage_result = await orchestrator.triage(ctx)
 
-            if triage_result == "ANSWER":
+            if not triage_result.needs_planning:
                 # Direct answer - no planning needed
-                logger.info("Triage: Direct answer (no planning)")
-                if has_images:
-                    response_text = await self._call_inner_agent(state, prompt_content, session_id)
-                else:
-                    response_text = await self._call_inner_agent(state, prompt_text, session_id)
-
-                # CRITICAL: If writes occurred, compliance review is MANDATORY
-                if state.has_write_operations:
-                    logger.info("ANSWER flow had write operations - triggering mandatory review")
-                    state.work_summary = response_text
-
-                    # Run compliance review on the work
-                    review_block_id = f"verify_{uuid4().hex[:8]}"
-                    review_block = start_tool_call(
-                        tool_call_id=review_block_id,
-                        title="Verifying changes",
-                        kind="think",
-                        status="in_progress",
-                    )
-                    await self._conn.session_update(session_id=session_id, update=review_block)
-
-                    # Create a minimal plan from the work done
-                    state.approved_plan = f"Respond to user query:\n{prompt_text}"
-
-                    report = await self._review_work(state, state.work_summary, session_id)
-
-                    if report.is_compliant:
-                        review_update = update_tool_call(
-                            tool_call_id=review_block_id,
-                            title="Changes verified",
-                            status="completed",
-                        )
-                        await self._conn.session_update(session_id=session_id, update=review_update)
-                    else:
-                        # Work failed compliance - request revision
-                        review_update = update_tool_call(
-                            tool_call_id=review_block_id,
-                            title="Applying corrections",
-                            status="in_progress",
-                        )
-                        await self._conn.session_update(session_id=session_id, update=review_update)
-
-                        logger.warning(f"ANSWER flow work failed compliance: {report.format()}")
-
-                        # Request revision from inner agent
-                        revise_prompt = (
-                            f"Your changes failed compliance review. Please revise:\n\n"
-                            f"{report.format()}\n\n"
-                            f"Revision guidance: {report.revision_guidance}\n\n"
-                            f"Make the necessary corrections."
-                        )
-                        await self._call_inner_agent(state, revise_prompt, session_id)
-
-                        review_update = update_tool_call(
-                            tool_call_id=review_block_id,
-                            title="Corrections applied",
-                            status="completed",
-                        )
-                        await self._conn.session_update(session_id=session_id, update=review_update)
-
+                await orchestrator.handle_direct_answer(ctx)
                 return PromptResponse(stop_reason="end_turn")
 
-            # === COMPLEXITY CLASSIFICATION ===
-            try:
-                task_complexity = await asyncio.to_thread(
-                    classify_task_complexity,
-                    classify_client,
-                    prompt_text,
-                )
-            except InvalidComplexityResponse:
-                # Default to MODERATE if classification fails
-                task_complexity = "MODERATE"
-
-            logger.info(f"Task complexity: {task_complexity}")
-
-            # === PHASE 1: PLANNING ===
-            logger.info("Phase 1: Planning")
-            state.phase = WorkflowPhase.PLANNING
-
-            # Request YAML plan from inner agent (silently - no text output)
-            plan_prompt = f"""\
-Create an implementation plan for this request. Output ONLY a YAML plan.
-
-REQUEST:
-{prompt_text}
-
-PLAN FORMAT (YAML only, no code, no markdown):
-```yaml
-goal: <one-line description of what will be achieved>
-tasks:
-  - description: <what this task accomplishes>
-    files: [<files to read or modify>]
-  - description: <next task>
-    files: [<files>]
-documentation:
-  - <doc file to update, if any exist for affected area>
-tests:
-  - <test file to create or update>
-```
-
-RULES:
-- Output ONLY the YAML plan, no other text
-- Do NOT include code snippets in the plan
-- Each task is a discrete step the user can track
-- Include documentation updates if docs exist for the affected area
-- Include tests for new features or bug fixes
-"""
-            if has_images:
-                plan_prompt_content = [*prompt_content, {"type": "text", "text": plan_prompt}]
-                plan_response = await self._call_inner_agent_silent(
-                    state, plan_prompt_content, session_id
-                )
-            else:
-                plan_response = await self._call_inner_agent_silent(
-                    state, plan_prompt, session_id
-                )
-
-            # Review plan based on complexity
-            # SIMPLE tasks get lightweight review (single attempt, sanity check only)
-            # MODERATE/COMPLEX tasks get full review (up to 5 attempts, all guidelines)
-            if task_complexity == "SIMPLE":
-                # Lightweight review for simple tasks - show user-friendly progress
-                state.set_current_action("Preparing approach")
-                review_block_id = f"plan_review_simple_{uuid4().hex[:8]}"
-                review_block = start_tool_call(
-                    tool_call_id=review_block_id,
-                    title="Preparing",
-                    kind="think",
-                    status="in_progress",
-                )
-                await self._conn.session_update(session_id=session_id, update=review_block)
-
-                report = await self._review_simple_plan(state, plan_response, session_id)
-
-                if report.is_compliant:
-                    state.approved_plan = plan_response
-
-                    review_update = update_tool_call(
-                        tool_call_id=review_block_id,
-                        title="Ready to proceed",
-                        status="completed",
-                    )
-                    await self._conn.session_update(session_id=session_id, update=review_update)
-
-                    await self._parse_and_send_plan(state, plan_response, session_id)
-
-                    # Show plan without internal terminology
-                    plan_msg = f"\n\n**Plan:**\n\n{plan_response}\n"
-                    chunk = update_agent_message(text_block(plan_msg))
-                    await self._conn.session_update(session_id=session_id, update=chunk)
-                else:
-                    # Simple task rejected - upgrade to full review (silently)
-                    logger.info("Simple task rejected, upgrading to full review")
-                    review_update = update_tool_call(
-                        tool_call_id=review_block_id,
-                        title="Refining approach",
-                        status="in_progress",
-                    )
-                    await self._conn.session_update(session_id=session_id, update=review_update)
-                    task_complexity = "MODERATE"  # Fall through to full review
-
-            # Full review for MODERATE/COMPLEX tasks (or upgraded SIMPLE tasks)
-            if task_complexity != "SIMPLE" and not state.approved_plan:
-                # Single progress indicator for the entire planning phase
-                planning_block_id = f"planning_{uuid4().hex[:8]}"
-                planning_block = start_tool_call(
-                    tool_call_id=planning_block_id,
-                    title="Analyzing request",
-                    kind="think",
-                    status="in_progress",
-                )
-                await self._conn.session_update(session_id=session_id, update=planning_block)
-
-                while state.plan_review_attempts < state.max_plan_attempts:
-                    attempt = state.plan_review_attempts + 1
-                    max_attempts = state.max_plan_attempts
-                    remaining = max_attempts - attempt
-
-                    # Update progress title based on attempt (user-friendly, no internal terminology)
-                    if attempt == 1:
-                        title = "Analyzing request"
-                    elif attempt == 2:
-                        title = "Refining approach"
-                    elif attempt == 3:
-                        title = "Revising solution"
-                    else:
-                        title = "Finalizing plan"
-
-                    planning_update = update_tool_call(
-                        tool_call_id=planning_block_id,
-                        title=title,
-                        status="in_progress",
-                    )
-                    await self._conn.session_update(session_id=session_id, update=planning_update)
-
-                    state.set_current_action(f"Planning (iteration {attempt})")
-                    report = await self._review_plan(state, plan_response, session_id)
-
-                    if report.is_compliant:
-                        state.approved_plan = plan_response
-
-                        # Update to completed with friendly message
-                        planning_update = update_tool_call(
-                            tool_call_id=planning_block_id,
-                            title="Ready to implement",
-                            status="completed",
-                        )
-                        await self._conn.session_update(session_id=session_id, update=planning_update)
-
-                        # Parse plan into tasks and send plan widget
-                        await self._parse_and_send_plan(state, plan_response, session_id)
-
-                        # Show the plan with friendly header
-                        plan_msg = f"\n\n**Plan:**\n\n{plan_response}\n"
-                        chunk = update_agent_message(text_block(plan_msg))
-                        await self._conn.session_update(session_id=session_id, update=chunk)
-                        break
-
-                    # Build violation details (for logging only, not shown to user)
-                    violation_lines = []
-                    for section in report.failing_sections:
-                        for g in section.guideline_scores:
-                            if not g.score.is_passing:
-                                violation_lines.append(
-                                    f"  - {g.guideline_id} ({g.score}): {g.justification}"
-                                )
-                    logger.debug(f"Plan violations: {violation_lines}")
-
-                    if state.plan_review_attempts >= state.max_plan_attempts:
-                        # Final attempt failed - show user-friendly clarification request
-                        planning_update = update_tool_call(
-                            tool_call_id=planning_block_id,
-                            title="Need more information",
-                            status="failed",
-                        )
-                        await self._conn.session_update(session_id=session_id, update=planning_update)
-
-                        # Generate context-specific questions using Haiku
-                        violations_for_questions = [
-                            f"{g.guideline_id}: {g.justification}"
-                            for section in report.failing_sections
-                            for g in section.guideline_scores
-                            if not g.score.is_passing
-                        ]
-                        questions = await asyncio.to_thread(
-                            generate_clarifying_questions,
-                            classify_client,
-                            prompt_text,
-                            violations_for_questions,
-                        )
-
-                        # Format numbered questions
-                        numbered_questions = "\n".join(
-                            f"{i + 1}. {q}" for i, q in enumerate(questions)
-                        )
-
-                        # User-friendly escalation message (no internal terminology)
-                        escalate_msg = (
-                            f"\n\n**Additional information required:**\n\n"
-                            f"{numbered_questions}\n"
-                        )
-                        chunk = update_agent_message(text_block(escalate_msg))
-                        await self._conn.session_update(session_id=session_id, update=chunk)
-                        return PromptResponse(stop_reason="end_turn")
-
-                    # Build revision strategy (internal only)
-                    revision_strategy = report.revision_guidance or "Address all violations listed."
-                    logger.debug(f"Revision strategy: {revision_strategy}")
-
-                    # Build clear violation feedback for the agent
-                    violations = []
-                    for section in report.failing_sections:
-                        for g in section.guideline_scores:
-                            if not g.score.is_passing:
-                                violations.append(
-                                    f"- {g.guideline_id} ({g.score}): {g.justification}"
-                                )
-
-                    urgency = ""
-                    if remaining <= 2:
-                        urgency = (
-                            f"\n\n⚠️ URGENT: You have {remaining} attempt(s) remaining. "
-                            f"Address ALL violations below or provide numbered questions "
-                            f"if you need clarification from the user."
-                        )
-
-                    # Request revised plan with clear feedback
-                    revise_prompt = f"""\
-Your plan FAILED compliance review. You MUST fix these violations:{urgency}
-
-VIOLATIONS:
-{chr(10).join(violations)}
-
-{f"REVISION GUIDANCE: {report.revision_guidance}" if report.revision_guidance else ""}
-
-REQUIREMENTS:
-1. Output ONLY a YAML plan (no code, no markdown explanation)
-2. Address EVERY violation listed above
-3. If you cannot address a violation, explain why in a numbered question format
-
-ORIGINAL REQUEST:
-{prompt_text}
-
-Provide your revised YAML plan now:
-"""
-                    plan_response = await self._call_inner_agent_silent(
-                        state, revise_prompt, session_id
-                    )
-
-            # === PHASE 2: EXECUTION ===
-            logger.info("Phase 2: Execution")
-            state.phase = WorkflowPhase.EXECUTING
-            state.set_current_action("Implementing the plan")
-
-            execute_prompt = (
-                f"Implement the approved plan. Proceed with the implementation now.\n\n"
-                f"Plan:\n{state.approved_plan}"
+            # === PLANNING, EXECUTION, AND REVIEW ===
+            plan_approved = await orchestrator.handle_planning(
+                ctx, triage_result.complexity or "MODERATE", WorkflowPhase
             )
-            work_response = await self._call_inner_agent(state, execute_prompt, session_id)
-            state.work_summary = work_response
 
-            # Update task progress after execution
-            await self._update_task_progress(state, work_response, session_id)
+            if not plan_approved:
+                # Planning escalated or failed
+                return PromptResponse(stop_reason="end_turn")
 
-            # === PHASE 3: REVIEW CYCLE ===
-            while True:
-                # Check if work is ready for review
-                ready = await self._check_ready_for_review(state, work_response)
+            # Execute the approved plan
+            await orchestrator.handle_execution(ctx, WorkflowPhase)
 
-                if ready:
-                    logger.info("Phase 3: Reviewing work")
-                    state.phase = WorkflowPhase.REVIEWING
-                    state.set_current_action("Finalizing changes")
-
-                    # Show user-friendly progress (hide "review" terminology)
-                    review_block_id = f"finalize_{uuid4().hex[:8]}"
-                    review_block = start_tool_call(
-                        tool_call_id=review_block_id,
-                        title="Verifying changes",
-                        kind="think",
-                        status="in_progress",
-                    )
-                    await self._conn.session_update(
-                        session_id=session_id, update=review_block
-                    )
-
-                    report = await self._review_work(state, state.work_summary, session_id)
-
-                    if report.is_compliant:
-                        state.phase = WorkflowPhase.COMPLETE
-
-                        # Mark all tasks as completed
-                        for task in state.plan_tasks:
-                            task.status = "completed"
-                        await self._send_plan_update(state, session_id)
-
-                        # Update with friendly completion message
-                        review_update = update_tool_call(
-                            tool_call_id=review_block_id,
-                            title="Done",
-                            status="completed",
-                        )
-                        await self._conn.session_update(
-                            session_id=session_id, update=review_update
-                        )
-                        break
-
-                    # Update with neutral message (hide review failure details from user)
-                    review_update = update_tool_call(
-                        tool_call_id=review_block_id,
-                        title="Applying adjustments",
-                        status="in_progress",
-                    )
-                    await self._conn.session_update(
-                        session_id=session_id, update=review_update
-                    )
-                    logger.debug(f"Work review failed: {report.format()}")
-
-                    # Request revision from inner agent (internal, not shown to user)
-                    revise_prompt = (
-                        f"Your work failed compliance review. Please revise:\n\n"
-                        f"{report.format()}\n\n"
-                        f"Revision guidance: {report.revision_guidance}\n\n"
-                        f"Make the necessary changes to achieve 5/5 on all guidelines."
-                    )
-                    work_response = await self._call_inner_agent(
-                        state, revise_prompt, session_id
-                    )
-                    state.work_summary += f"\n\n[Revision]\n{work_response}"
-
-                    # Update task progress after revision
-                    await self._update_task_progress(state, work_response, session_id)
-                else:
-                    # Not ready - work is still in progress, wait for next iteration
-                    # The inner agent should continue working
-                    logger.info("Work not ready for review, continuing execution")
-                    break
+            # Review cycle
+            await orchestrator.handle_review_cycle(ctx, WorkflowPhase)
 
         except Exception as e:
             error_msg = f"Error: {e}"

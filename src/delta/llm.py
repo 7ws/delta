@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 from textwrap import dedent
+from threading import Lock
 
 
 class ClaudeCodeClient:
@@ -38,47 +41,55 @@ class ClaudeCodeClient:
         return result.stdout
 
 
+class LLMClientPool:
+    """Pool of LLM clients for reuse.
+
+    Provides thread-safe client caching to avoid creating new clients
+    for each classification operation.
+    """
+
+    _instance: LLMClientPool | None = None
+    _lock = Lock()
+
+    def __init__(self) -> None:
+        """Initialize the client pool."""
+        self._clients: dict[str, ClaudeCodeClient] = {}
+        self._client_lock = Lock()
+
+    @classmethod
+    def get_instance(cls) -> LLMClientPool:
+        """Get the singleton pool instance."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def get_client(self, model: str | None = None) -> ClaudeCodeClient:
+        """Get or create a client for the specified model.
+
+        Args:
+            model: Model name (None for default).
+
+        Returns:
+            Cached or new ClaudeCodeClient.
+        """
+        key = model or "default"
+        with self._client_lock:
+            if key not in self._clients:
+                self._clients[key] = ClaudeCodeClient(model=model)
+            return self._clients[key]
+
+
 def get_classify_client(model: str = "haiku") -> ClaudeCodeClient:
     """Get a fast LLM client for action classification.
+
+    Uses the client pool for reuse.
 
     Args:
         model: Model to use for classification.
     """
-    return ClaudeCodeClient(model=model)
-
-
-def classify_action_type(client: ClaudeCodeClient, action: str) -> bool:
-    """Classify whether an action is read-only using a fast LLM.
-
-    Args:
-        client: Claude Code client.
-        action: The action description to classify.
-
-    Returns:
-        True if the action is read-only, False if it modifies state.
-    """
-    from textwrap import dedent
-
-    prompt = dedent(f"""\
-        Classify this action as READ-ONLY or READ-WRITE.
-
-        Action: {action}
-
-        READ-ONLY: Only reads data, no side effects
-        (e.g., git status, ls, cat, grep, git diff, gh pr list)
-
-        READ-WRITE: Modifies files, state, or has side effects
-        (e.g., git commit, rm, echo > file, git push)
-
-        Reply with exactly one word: READONLY or READWRITE\
-    """)
-
-    response = client.complete(
-        prompt=prompt,
-        system="You classify actions. Reply with exactly one word: READONLY or READWRITE",
-    )
-
-    return "READONLY" in response.upper()
+    return LLMClientPool.get_instance().get_client(model)
 
 
 def get_llm_client(model: str | None = None) -> ClaudeCodeClient:
@@ -90,7 +101,7 @@ def get_llm_client(model: str | None = None) -> ClaudeCodeClient:
     Returns:
         Configured Claude Code client.
     """
-    return ClaudeCodeClient(model=model)
+    return LLMClientPool.get_instance().get_client(model)
 
 
 class InvalidReviewReadinessResponse(Exception):
@@ -123,6 +134,12 @@ class InvalidTaskDuplicateResponse(Exception):
     pass
 
 
+class InvalidPlanParseResponse(Exception):
+    """Raised when plan parsing returns an invalid response."""
+
+    pass
+
+
 def classify_task_duplicate(
     client: ClaudeCodeClient,
     existing_tasks: list[str],
@@ -130,9 +147,6 @@ def classify_task_duplicate(
     max_retries: int = 2,
 ) -> bool:
     """Classify whether a new task duplicates any existing task using AI.
-
-    ARCHITECTURAL DECISION: All text interpretation in Delta MUST use AI agents,
-    not hardcoded patterns. This ensures flexibility and maintainability.
 
     Args:
         client: Claude Code client (Haiku recommended for speed).
@@ -178,7 +192,6 @@ def classify_task_duplicate(
         if response_upper == "UNIQUE" or response_upper.startswith("UNIQUE\n"):
             return False
 
-        # Invalid response - retry with callout
         if attempt < max_retries:
             prompt = dedent(f"""\
                 Your previous response was invalid: "{response}"
@@ -197,7 +210,6 @@ def classify_task_duplicate(
                 f"Invalid task duplicate classification after {max_retries + 1} attempts"
             )
 
-    # Unreachable: loop always returns or raises
     raise InvalidTaskDuplicateResponse("Unexpected exit from task duplicate loop")
 
 
@@ -209,11 +221,7 @@ def classify_write_operation(
 ) -> bool:
     """Classify whether a tool operation is a write operation using AI.
 
-    ARCHITECTURAL DECISION: All text interpretation in Delta MUST use AI agents,
-    not hardcoded patterns. This ensures flexibility and maintainability.
-
-    Write operations MUST trigger compliance review. This function uses AI to
-    determine whether a tool call modifies state (files, git, system).
+    Write operations MUST trigger compliance review.
 
     Args:
         client: Claude Code client (Haiku recommended for speed).
@@ -268,7 +276,6 @@ def classify_write_operation(
         if response_upper == "READONLY" or response_upper.startswith("READONLY\n"):
             return False
 
-        # Invalid response - retry with callout
         if attempt < max_retries:
             prompt = dedent(f"""\
                 Your previous response was invalid: "{response}"
@@ -285,7 +292,6 @@ def classify_write_operation(
                 f"Invalid write classification after {max_retries + 1} attempts: {response}"
             )
 
-    # Unreachable: loop always returns or raises
     raise InvalidWriteClassificationResponse("Unexpected exit from write classification loop")
 
 
@@ -293,14 +299,6 @@ def classify_task_complexity(
     client: ClaudeCodeClient, message: str, max_retries: int = 2
 ) -> str:
     """Classify the complexity of a task to determine review depth.
-
-    Analyzes the user's message to determine task complexity:
-    - SIMPLE: Single-step operations with clear outcomes (git rewrites, file renames,
-      config changes, standard git operations)
-    - MODERATE: Multi-step tasks with some decisions (adding features to existing
-      patterns, bug fixes, refactoring)
-    - COMPLEX: Architectural changes, new systems, or tasks requiring significant
-      design decisions
 
     Args:
         client: Claude Code client (Haiku recommended for speed).
@@ -313,8 +311,6 @@ def classify_task_complexity(
     Raises:
         InvalidComplexityResponse: If response is invalid after retries.
     """
-    from textwrap import dedent
-
     prompt = dedent(f"""\
         Classify this task by complexity to determine appropriate review depth.
 
@@ -389,10 +385,6 @@ def triage_user_message(
 ) -> str:
     """Determine how to handle a user message.
 
-    Analyzes the user's message to determine whether it:
-    - Requires implementation planning (code changes, new features, fixes)
-    - Can be answered directly (questions, explanations, information)
-
     Args:
         client: Claude Code client (Haiku recommended for speed).
         message: The user's message to analyze.
@@ -404,8 +396,6 @@ def triage_user_message(
     Raises:
         InvalidTriageResponse: If response is not PLAN or ANSWER after retries.
     """
-    from textwrap import dedent
-
     prompt = dedent(f"""\
         Analyze this user message and determine how to handle it.
 
@@ -438,13 +428,11 @@ def triage_user_message(
         response = client.complete(prompt=prompt, system=system)
         response_upper = response.upper().strip()
 
-        # Check for exact match (not substring)
         if response_upper == "PLAN" or response_upper.startswith("PLAN\n"):
             return "PLAN"
         if response_upper == "ANSWER" or response_upper.startswith("ANSWER\n"):
             return "ANSWER"
 
-        # Invalid response - retry with callout
         if attempt < max_retries:
             prompt = dedent(f"""\
                 Your previous response was invalid: "{response}"
@@ -461,7 +449,6 @@ def triage_user_message(
                 f"Invalid triage response after {max_retries + 1} attempts: {response}"
             )
 
-    # Unreachable: loop always returns or raises
     raise InvalidTriageResponse("Unexpected exit from triage loop")
 
 
@@ -473,9 +460,6 @@ def generate_clarifying_questions(
 ) -> list[str]:
     """Generate specific questions to resolve compliance violations.
 
-    Creates targeted questions that, when answered, would allow the agent
-    to create a plan that scores 5/5 on all guidelines.
-
     Args:
         client: Claude Code client (Haiku recommended for speed).
         user_request: The original user request.
@@ -483,12 +467,8 @@ def generate_clarifying_questions(
         max_retries: Maximum retry attempts for invalid responses.
 
     Returns:
-        List of numbered questions (without the numbers).
+        List of questions (without numbers).
     """
-    import json
-    import re
-    from textwrap import dedent
-
     violations_text = "\n".join(violations)
 
     prompt = dedent(f"""\
@@ -520,7 +500,6 @@ def generate_clarifying_questions(
         response = client.complete(prompt=prompt, system=system)
         response_stripped = response.strip()
 
-        # Try direct parse
         try:
             questions = json.loads(response_stripped)
             if isinstance(questions, list) and all(isinstance(q, str) for q in questions):
@@ -528,7 +507,6 @@ def generate_clarifying_questions(
         except json.JSONDecodeError:
             pass
 
-        # Try to find JSON array in response
         json_match = re.search(r"\[.*?\]", response_stripped, re.DOTALL)
         if json_match:
             try:
@@ -538,7 +516,6 @@ def generate_clarifying_questions(
             except json.JSONDecodeError:
                 pass
 
-        # Retry with feedback
         if attempt < max_retries:
             prompt = dedent(f"""\
                 Your response was invalid: "{response[:200]}"
@@ -551,21 +528,11 @@ def generate_clarifying_questions(
                 Example format: ["Question 1?", "Question 2?"]
             """)
 
-    # Fallback if all retries fail
     return ["What specific behavior do you expect from this change?"]
-
-
-class InvalidPlanParseResponse(Exception):
-    """Raised when plan parsing returns an invalid response."""
-
-    pass
 
 
 def parse_plan_tasks(client: ClaudeCodeClient, plan: str, max_retries: int = 2) -> list[str]:
     """Extract discrete tasks from a plan using Haiku.
-
-    Parses the plan text and extracts actionable tasks that can be
-    tracked in the Plan widget.
 
     Args:
         client: Claude Code client (Haiku recommended for speed).
@@ -578,10 +545,6 @@ def parse_plan_tasks(client: ClaudeCodeClient, plan: str, max_retries: int = 2) 
     Raises:
         InvalidPlanParseResponse: If response cannot be parsed after retries.
     """
-    import json
-    import re
-    from textwrap import dedent
-
     prompt = dedent(f"""\
         Extract the discrete tasks from this implementation plan.
 
@@ -603,11 +566,8 @@ def parse_plan_tasks(client: ClaudeCodeClient, plan: str, max_retries: int = 2) 
 
     for attempt in range(max_retries + 1):
         response = client.complete(prompt=prompt, system=system)
-
-        # Try to extract JSON array from response
         response_stripped = response.strip()
 
-        # Try direct parse first
         try:
             tasks = json.loads(response_stripped)
             if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
@@ -615,7 +575,6 @@ def parse_plan_tasks(client: ClaudeCodeClient, plan: str, max_retries: int = 2) 
         except json.JSONDecodeError:
             pass
 
-        # Try to find JSON array in response
         json_match = re.search(r"\[.*?\]", response_stripped, re.DOTALL)
         if json_match:
             try:
@@ -625,7 +584,6 @@ def parse_plan_tasks(client: ClaudeCodeClient, plan: str, max_retries: int = 2) 
             except json.JSONDecodeError:
                 pass
 
-        # Invalid response - retry with callout
         if attempt < max_retries:
             prompt = dedent(f"""\
                 Your previous response was invalid: "{response[:200]}"
@@ -642,7 +600,6 @@ def parse_plan_tasks(client: ClaudeCodeClient, plan: str, max_retries: int = 2) 
                 f"Failed to parse plan into tasks after {max_retries + 1} attempts"
             )
 
-    # Unreachable: loop always returns or raises
     raise InvalidPlanParseResponse("Unexpected exit from parse loop")
 
 
@@ -653,9 +610,6 @@ def detect_task_progress(
 ) -> dict[int, str]:
     """Detect task progress from recent agent output.
 
-    Analyzes the agent's recent output to determine which tasks have been
-    started or completed.
-
     Args:
         client: Claude Code client (Haiku recommended for speed).
         tasks: List of task descriptions from the plan.
@@ -663,12 +617,7 @@ def detect_task_progress(
 
     Returns:
         Dict mapping task index to status ("in_progress" or "completed").
-        Only includes tasks whose status should change.
     """
-    import json
-    import re
-    from textwrap import dedent
-
     if not tasks:
         return {}
 
@@ -701,11 +650,9 @@ def detect_task_progress(
     response = client.complete(prompt=prompt, system=system)
     response_stripped = response.strip()
 
-    # Try to parse JSON
     try:
         result = json.loads(response_stripped)
         if isinstance(result, dict):
-            # Convert string keys to int and validate values
             return {
                 int(k): v
                 for k, v in result.items()
@@ -714,7 +661,6 @@ def detect_task_progress(
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Try to find JSON object in response
     json_match = re.search(r"\{.*?\}", response_stripped, re.DOTALL)
     if json_match:
         try:
@@ -734,12 +680,6 @@ def detect_task_progress(
 def is_ready_for_review(client: ClaudeCodeClient, context: str, max_retries: int = 2) -> bool:
     """Determine whether work is ready for compliance review.
 
-    Evaluates the inner agent's recent output to detect signals that work
-    is in a reviewable state. Reviewable states include:
-    - The agent signals completion (for example, "done", "completed", "finished")
-    - The agent produces a deliverable (for example, commits, creates files)
-    - The agent asks for user feedback or next steps
-
     Args:
         client: Claude Code client (Haiku recommended for speed).
         context: Recent inner agent output and actions to evaluate.
@@ -751,8 +691,6 @@ def is_ready_for_review(client: ClaudeCodeClient, context: str, max_retries: int
     Raises:
         InvalidReviewReadinessResponse: If response is not READY or NOTREADY after retries.
     """
-    from textwrap import dedent
-
     prompt = dedent(f"""\
         Evaluate whether the AI agent's work is ready for compliance review.
 
@@ -785,7 +723,6 @@ def is_ready_for_review(client: ClaudeCodeClient, context: str, max_retries: int
         if "READY" in response_upper:
             return True
 
-        # Invalid response - retry with callout
         if attempt < max_retries:
             prompt = dedent(f"""\
                 Your previous response was invalid: "{response}"
@@ -802,138 +739,4 @@ def is_ready_for_review(client: ClaudeCodeClient, context: str, max_retries: int
                 f"Invalid response after {max_retries + 1} attempts: {response}"
             )
 
-    # Unreachable: loop always returns or raises
     raise InvalidReviewReadinessResponse("Unexpected exit from readiness loop")
-
-
-def interpret_for_user(
-    client: ClaudeCodeClient,
-    inner_agent_text: str,
-    workflow_phase: str,
-    context: str = "",
-) -> str | None:
-    """Interpret inner agent output into user-appropriate status updates.
-
-    Transforms inter-agent communication into meaningful updates for the actual user.
-    Returns None if the text contains no user-relevant information.
-
-    The interpretation layer ensures the user sees a clean, single-agent experience
-    by filtering out:
-    - Inter-agent communication (references to "the user chose", acknowledgments)
-    - Compliance scores and guideline references (§X.X.X notation)
-    - Internal workflow state (review attempts, phase transitions)
-    - Agent-to-agent instructions and feedback
-
-    Args:
-        client: Claude Code client for interpretation.
-        inner_agent_text: Raw text from the inner agent.
-        workflow_phase: Current phase (planning, executing, reviewing).
-        context: Optional additional context about what the agent is doing.
-
-    Returns:
-        User-appropriate status text, or None if text should be suppressed.
-    """
-    # Quick pattern-based filtering for obvious inter-agent chatter
-    # This avoids LLM calls for clearly internal content
-    suppression_patterns = [
-        "§",  # Guideline references
-        "compliance score",
-        "compliance review",
-        "plan review",
-        "work review",
-        "the user chose",
-        "the user acknowledged",
-        "the user confirmed",
-        "user selected",
-        "agent-to-agent",
-        "inter-agent",
-        "review attempt",
-        "attempt failed",
-        "revision guidance",
-        "revision strategy",
-        "AGENTS.md",
-        "guideline",
-        "5/5",
-        "4/5",
-        "3/5",
-        "2/5",
-        "1/5",
-        "inner agent",
-        "outer agent",
-        "workflow phase",
-        "phase transition",
-    ]
-
-    text_lower = inner_agent_text.lower()
-    for pattern in suppression_patterns:
-        if pattern.lower() in text_lower:
-            # Check if this is primarily inter-agent content
-            # If the pattern appears multiple times or is the main content, suppress
-            if text_lower.count(pattern.lower()) > 1 or len(inner_agent_text.strip()) < 200:
-                return None
-
-    # For longer content, use LLM to intelligently filter
-    context_section = f"\n  additional_context: {context}" if context else ""
-
-    prompt = dedent(f"""\
----
-context:
-  goal: Present a seamless single-agent experience to the human user
-  architecture: |
-    This is a multi-agent system, but the user should perceive a single agent.
-    - The user sees only the final, polished output
-    - Internal orchestration, reviews, and agent coordination remain hidden
-  current_phase: {workflow_phase}{context_section}
----
-
-AGENT OUTPUT TO FILTER:
-{inner_agent_text}
-
----
-SUPPRESS these (output exactly "SUPPRESS"):
-  - Compliance scores, guideline references (§X.X.X), review results
-  - "The user chose/acknowledged/confirmed" (inter-agent communication)
-  - Review attempts, revision guidance, phase transitions
-  - Meta-commentary about the workflow or process
-  - Empty or redundant status updates
-  - Acknowledgments of internal instructions
-
-KEEP and CLEAN these (output the cleaned text):
-  - Actual progress: "Reading file X", "Creating function Y"
-  - Code blocks and technical content
-  - File paths, error messages, results
-  - Direct answers to user questions
-  - Explanations of what was done (not why compliance required it)
-
-OUTPUT FORMAT:
-- If content should be hidden from user: output exactly "SUPPRESS"
-- If content is useful: output the cleaned text, written as if speaking directly to the user
-- Use clear, direct language
-- Remove any references to internal processes
----
-
-OUTPUT:\
-    """)
-
-    response = client.complete(prompt).strip()
-
-    if response == "SUPPRESS" or not response:
-        return None
-
-    # Final cleanup: remove any remaining internal references that slipped through
-    cleanup_phrases = [
-        "As per the compliance",
-        "Following the guidelines",
-        "According to AGENTS.md",
-        "The review indicated",
-        "After compliance review",
-    ]
-
-    result = response
-    for phrase in cleanup_phrases:
-        if phrase in result:
-            # Remove the phrase and any following text until the next sentence
-            import re
-            result = re.sub(rf"{re.escape(phrase)}[^.]*\.\s*", "", result, flags=re.IGNORECASE)
-
-    return result.strip() if result.strip() else None
