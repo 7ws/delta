@@ -122,6 +122,15 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 2.9.3: When established patterns cannot be followed, state the specific reason before proceeding. Do not silently deviate.
 - 2.9.4: When inconsistent patterns are discovered across the codebase, inform the user and offer to assist with standardisation. Do not standardise without explicit user request.
 
+## 2.10 Evidence-Based Conclusions
+
+- 2.10.1: Every factual claim about the codebase, project, or technical behaviour must cite a verifiable source: file path and line number, command output, URL, or explicit user statement.
+- 2.10.2: Do not use training data, learned material, or general knowledge as authoritative sources for project-specific claims. Verify every claim against the actual codebase or official documentation.
+- 2.10.3: When a claim cannot be verified from available evidence, state "I cannot verify this" and explain what evidence would be required to confirm the claim.
+- 2.10.4: Distinguish hypotheses from verified facts using explicit labels. Use "Verified:" for claims with cited evidence and "Hypothesis:" for inferences that lack direct evidence.
+- 2.10.5: Treat all AI-generated conclusions as unverified until grounded in evidence. The burden of proof lies with the agent, not the user.
+- 2.10.6: When documentation contradicts code behaviour, code behaviour is authoritative. Document the discrepancy and cite the specific file and line number demonstrating the actual behaviour.
+
 
 ---
 
@@ -442,6 +451,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 12.4.2: When making assumptions, state them before proceeding.
 - 12.4.3: When a task has risks, state them before executing.
 - 12.4.4: When blocked, explain what is blocking and what is needed to proceed.
+- 12.4.5: When conclusions derive from inference rather than direct evidence, state "Inferred from [source]" to distinguish from verified facts. See section 2.10 for evidence requirements.
 
 ## 12.5 Questions Are Not Requests
 
