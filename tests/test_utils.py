@@ -58,8 +58,33 @@ class TestParseJson:
         result = parse_json(response)
         assert result == ["a", "b", "c"]
 
-    def test_raises_on_invalid_json(self):
-        """Should raise ValueError on invalid JSON."""
+    def test_repairs_invalid_json(self):
+        """Should repair invalid JSON using json_repair fallback."""
         response = '```json\n{invalid json}\n```'
-        with pytest.raises(ValueError):
-            parse_json(response)
+        result = parse_json(response)
+        # json_repair repairs this to some valid JSON structure
+        assert isinstance(result, (dict, list))
+
+    def test_repairs_truncated_json_with_unterminated_string(self):
+        """Should repair truncated JSON with unterminated string using json_repair."""
+        # Simulates LLM output truncated mid-string
+        response = '```json\n{"key": "value", "desc": "truncated string\n```'
+        result = parse_json(response)
+        assert isinstance(result, dict)
+        assert result["key"] == "value"
+        assert "truncated" in result["desc"]
+
+    def test_repairs_truncated_json_missing_closing_brace(self):
+        """Should repair truncated JSON missing closing brace."""
+        response = '```json\n{"sections": [{"number": 1, "name": "Test"}\n```'
+        result = parse_json(response)
+        assert isinstance(result, dict)
+        assert "sections" in result
+
+    def test_repairs_truncated_nested_json(self):
+        """Should repair truncated nested JSON structure."""
+        # Include closing brace so extract_json can find it, but with truncated content
+        response = '{"outer": {"inner": "value", "list": [1, 2, 3}'
+        result = parse_json(response)
+        assert isinstance(result, dict)
+        assert "outer" in result

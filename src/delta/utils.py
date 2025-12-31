@@ -7,6 +7,8 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import json_repair
+
 
 def extract_json(response: str) -> str:
     """Extract JSON from a response that may contain markdown code blocks.
@@ -48,6 +50,9 @@ def extract_json(response: str) -> str:
 def parse_json(response: str) -> dict[str, Any] | list[Any]:
     """Extract and parse JSON from a response.
 
+    Uses json_repair as fallback when standard json.loads fails on malformed
+    JSON (for example, truncated responses with unterminated strings).
+
     Args:
         response: Raw response text that may contain JSON.
 
@@ -58,7 +63,13 @@ def parse_json(response: str) -> dict[str, Any] | list[Any]:
         ValueError: If no valid JSON found in response.
     """
     json_str = extract_json(response)
-    result: dict[str, Any] | list[Any] = json.loads(json_str)
+    try:
+        result: dict[str, Any] | list[Any] = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        repaired = json_repair.loads(json_str)
+        if not isinstance(repaired, (dict, list)):
+            raise ValueError(f"Repaired JSON is not dict or list: {type(repaired)}") from e
+        result = repaired
     return result
 
 

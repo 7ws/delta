@@ -8,6 +8,8 @@ import subprocess
 from textwrap import dedent
 from threading import Lock
 
+import json_repair
+
 
 class ClaudeCodeClient:
     """LLM client that uses Claude Code CLI for completions."""
@@ -539,7 +541,9 @@ from context and provide a summary of completed work or suggest next steps.
                 if isinstance(questions, list) and all(isinstance(q, str) for q in questions):
                     return questions
             except json.JSONDecodeError:
-                pass
+                questions = json_repair.loads(json_match.group())
+                if isinstance(questions, list) and all(isinstance(q, str) for q in questions):
+                    return questions
 
         if attempt < max_retries:
             prompt = dedent(f"""\
@@ -607,7 +611,9 @@ def parse_plan_tasks(client: ClaudeCodeClient, plan: str, max_retries: int = 2) 
                 if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
                     return tasks
             except json.JSONDecodeError:
-                pass
+                tasks = json_repair.loads(json_match.group())
+                if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
+                    return tasks
 
         if attempt < max_retries:
             prompt = dedent(f"""\
@@ -697,7 +703,13 @@ def detect_task_progress(
                     if v in ("in_progress", "completed")
                 }
         except (json.JSONDecodeError, ValueError):
-            pass
+            result = json_repair.loads(json_match.group())
+            if isinstance(result, dict):
+                return {
+                    int(k): v
+                    for k, v in result.items()
+                    if v in ("in_progress", "completed")
+                }
 
     return {}
 
