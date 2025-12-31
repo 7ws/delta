@@ -5,11 +5,12 @@ instead of asking redundant clarifying questions when recent actions provide
 sufficient information.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from delta.llm import ClaudeCodeClient, generate_clarifying_questions
+from delta.thinking_status import ThinkingStatusManager
 from delta.workflow import WorkflowContext, WorkflowOrchestrator
 
 
@@ -133,12 +134,21 @@ class TestBuildConversationContext:
         }
 
     @pytest.fixture
-    def orchestrator(self, mock_callbacks):
-        """Create orchestrator with mock connection."""
-        from unittest.mock import MagicMock
+    def mock_thinking_status(self):
+        """Create a mock ThinkingStatusManager."""
+        thinking_status = MagicMock(spec=ThinkingStatusManager)
+        thinking_status.start = AsyncMock()
+        thinking_status.stop = AsyncMock()
+        thinking_status.set_step = AsyncMock()
+        return thinking_status
 
+    @pytest.fixture
+    def orchestrator(self, mock_callbacks, mock_thinking_status):
+        """Create orchestrator with mock connection."""
         conn = MagicMock()
-        return WorkflowOrchestrator(conn=conn, **mock_callbacks)
+        return WorkflowOrchestrator(
+            conn=conn, thinking_status=mock_thinking_status, **mock_callbacks
+        )
 
     def test_given_tool_history_when_context_built_then_includes_recent_actions(
         self, orchestrator
@@ -265,12 +275,21 @@ class TestBuildContextInferencePrompt:
         }
 
     @pytest.fixture
-    def orchestrator(self, mock_callbacks):
-        """Create orchestrator with mock connection."""
-        from unittest.mock import MagicMock
+    def mock_thinking_status(self):
+        """Create a mock ThinkingStatusManager."""
+        thinking_status = MagicMock(spec=ThinkingStatusManager)
+        thinking_status.start = AsyncMock()
+        thinking_status.stop = AsyncMock()
+        thinking_status.set_step = AsyncMock()
+        return thinking_status
 
+    @pytest.fixture
+    def orchestrator(self, mock_callbacks, mock_thinking_status):
+        """Create orchestrator with mock connection."""
         conn = MagicMock()
-        return WorkflowOrchestrator(conn=conn, **mock_callbacks)
+        return WorkflowOrchestrator(
+            conn=conn, thinking_status=mock_thinking_status, **mock_callbacks
+        )
 
     def test_given_context_when_inference_prompt_built_then_includes_user_request(
         self, orchestrator

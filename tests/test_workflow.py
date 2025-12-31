@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from delta.thinking_status import ThinkingStatusManager, WorkflowStep
 from delta.workflow import TriageResult, WorkflowContext, WorkflowOrchestrator
 
 
@@ -54,6 +55,15 @@ class TestWorkflowOrchestrator:
         return conn
 
     @pytest.fixture
+    def mock_thinking_status(self):
+        """Create a mock ThinkingStatusManager."""
+        thinking_status = MagicMock(spec=ThinkingStatusManager)
+        thinking_status.start = AsyncMock()
+        thinking_status.stop = AsyncMock()
+        thinking_status.set_step = AsyncMock()
+        return thinking_status
+
+    @pytest.fixture
     def mock_callbacks(self):
         """Create mock callbacks."""
         return {
@@ -69,10 +79,11 @@ class TestWorkflowOrchestrator:
         }
 
     @pytest.fixture
-    def orchestrator(self, mock_conn, mock_callbacks):
+    def orchestrator(self, mock_conn, mock_thinking_status, mock_callbacks):
         """Create a WorkflowOrchestrator instance."""
         return WorkflowOrchestrator(
             conn=mock_conn,
+            thinking_status=mock_thinking_status,
             classify_model="haiku",
             **mock_callbacks,
         )
@@ -178,10 +189,10 @@ class TestWorkflowOrchestrator:
         assert "goal:" in prompt
         assert "tasks:" in prompt
 
-    def test_get_planning_title(self, orchestrator):
-        """Should return appropriate titles for each attempt."""
-        assert orchestrator._get_planning_title(1) == "Analyzing request"
-        assert orchestrator._get_planning_title(2) == "Refining approach"
-        assert orchestrator._get_planning_title(3) == "Revising solution"
-        assert orchestrator._get_planning_title(4) == "Finalizing plan"
-        assert orchestrator._get_planning_title(5) == "Finalizing plan"
+    def test_get_planning_step(self, orchestrator):
+        """Given an attempt number, when getting planning step, then returns correct step."""
+        assert orchestrator._get_planning_step(1) == WorkflowStep.PLANNING_FULL
+        assert orchestrator._get_planning_step(2) == WorkflowStep.PLANNING_REFINING
+        assert orchestrator._get_planning_step(3) == WorkflowStep.PLANNING_REVISING
+        assert orchestrator._get_planning_step(4) == WorkflowStep.PLANNING_FINALIZING
+        assert orchestrator._get_planning_step(5) == WorkflowStep.PLANNING_FINALIZING

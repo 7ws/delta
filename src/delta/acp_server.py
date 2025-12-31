@@ -104,6 +104,7 @@ from delta.protocol import (
     read_file_content,
 )
 from delta.review import ReviewPhaseHandler
+from delta.thinking_status import ThinkingStatusManager, WorkflowStep
 from delta.workflow import WorkflowContext, WorkflowOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -996,10 +997,13 @@ class DeltaAgent(Agent):
         """Handle authentication."""
         return None
 
-    def _get_workflow_orchestrator(self, session_id: str) -> WorkflowOrchestrator:
+    def _get_workflow_orchestrator(
+        self, session_id: str, thinking_status: ThinkingStatusManager
+    ) -> WorkflowOrchestrator:
         """Create a workflow orchestrator with callbacks to this agent."""
         return WorkflowOrchestrator(
             conn=self._conn,
+            thinking_status=thinking_status,
             classify_model=self.classify_model,
             call_inner_agent=self._call_inner_agent,
             call_inner_agent_silent=self._call_inner_agent_silent,
@@ -1059,37 +1063,28 @@ class DeltaAgent(Agent):
             state=state,
         )
 
-        # Create orchestrator with callbacks
-        orchestrator = self._get_workflow_orchestrator(session_id)
+        # Create thinking status manager for real-time feedback
+        thinking_status = ThinkingStatusManager(self._conn, session_id)
 
-        # Send early status update to inform user that processing has started
-        triage_block_id = f"triage_{uuid4().hex[:8]}"
-        triage_block = start_tool_call(
-            tool_call_id=triage_block_id,
-            title="Analyzing request",
-            kind="think",
-            status="in_progress",
-        )
-        await self._conn.session_update(session_id=session_id, update=triage_block)
+        # Create orchestrator with callbacks
+        orchestrator = self._get_workflow_orchestrator(session_id, thinking_status)
 
         try:
+            # Start thinking status with triage step
+            await thinking_status.start(WorkflowStep.TRIAGE)
+
             # === TRIAGE: Determine if planning is needed ===
             triage_result = await orchestrator.triage(ctx)
 
-            # Complete the triage status
-            triage_update = update_tool_call(
-                tool_call_id=triage_block_id,
-                status="completed",
-            )
-            await self._conn.session_update(session_id=session_id, update=triage_update)
-
             if not triage_result.needs_planning:
                 # Direct answer - no planning needed
+                await thinking_status.stop("Ready")
                 direct_completed = await orchestrator.handle_direct_answer(ctx)
                 if direct_completed:
                     return PromptResponse(stop_reason="end_turn")
                 # Write was blocked - fall through to planning
                 logger.info("Direct answer blocked write, transitioning to planning")
+                await thinking_status.start(WorkflowStep.PLANNING_FULL)
 
             # === PLANNING, EXECUTION, AND REVIEW ===
             plan_approved = await orchestrator.handle_planning(
@@ -1107,6 +1102,7 @@ class DeltaAgent(Agent):
             await orchestrator.handle_review_cycle(ctx, WorkflowPhase)
 
         except Exception as e:
+            await thinking_status.stop("Error")
             error_msg = f"Error: {e}"
             chunk = update_agent_message(text_block(error_msg))
             await self._conn.session_update(session_id=session_id, update=chunk)

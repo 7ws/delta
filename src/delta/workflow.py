@@ -10,9 +10,8 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
-from acp import start_tool_call, text_block, update_agent_message, update_tool_call
+from acp import text_block, update_agent_message
 
 from delta.compliance import ComplianceReport
 from delta.llm import (
@@ -23,6 +22,7 @@ from delta.llm import (
     get_classify_client,
     triage_user_message,
 )
+from delta.thinking_status import ThinkingStatusManager, WorkflowStep
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -68,6 +68,7 @@ class WorkflowOrchestrator:
     def __init__(
         self,
         conn: Client,
+        thinking_status: ThinkingStatusManager,
         classify_model: str = "haiku",
         *,
         call_inner_agent: Callable[..., Coroutine[Any, Any, str]],
@@ -84,6 +85,7 @@ class WorkflowOrchestrator:
 
         Args:
             conn: ACP client connection.
+            thinking_status: Manager for real-time thinking status updates.
             classify_model: Model for triage and complexity classification.
             call_inner_agent: Callback to call inner agent with streaming output.
             call_inner_agent_silent: Callback to call inner agent silently.
@@ -96,6 +98,7 @@ class WorkflowOrchestrator:
             update_task_progress: Callback to update task progress.
         """
         self._conn = conn
+        self._thinking_status = thinking_status
         self._classify_model = classify_model
 
         # Callbacks to DeltaAgent methods
@@ -196,32 +199,14 @@ class WorkflowOrchestrator:
         ctx.state.work_summary = response_text
         ctx.state.approved_plan = f"Respond to user query:\n{ctx.prompt_text}"
 
-        review_block_id = f"verify_{uuid4().hex[:8]}"
-        review_block = start_tool_call(
-            tool_call_id=review_block_id,
-            title="Verifying changes",
-            kind="think",
-            status="in_progress",
-        )
-        await self._conn.session_update(session_id=ctx.session_id, update=review_block)
+        await self._thinking_status.set_step(WorkflowStep.REVIEWING)
 
         report = await self._review_work(ctx.state, ctx.state.work_summary, ctx.session_id)
 
         if report.is_compliant:
-            review_update = update_tool_call(
-                tool_call_id=review_block_id,
-                title="Changes verified",
-                status="completed",
-            )
-            await self._conn.session_update(session_id=ctx.session_id, update=review_update)
+            await self._thinking_status.stop("Changes verified")
         else:
-            # Request revision
-            review_update = update_tool_call(
-                tool_call_id=review_block_id,
-                title="Applying corrections",
-                status="in_progress",
-            )
-            await self._conn.session_update(session_id=ctx.session_id, update=review_update)
+            await self._thinking_status.set_step(WorkflowStep.REVIEWING_CORRECTIONS)
 
             logger.warning(f"ANSWER flow work failed compliance: {report.format()}")
 
@@ -233,12 +218,7 @@ class WorkflowOrchestrator:
             )
             await self._call_inner_agent(ctx.state, revise_prompt, ctx.session_id)
 
-            review_update = update_tool_call(
-                tool_call_id=review_block_id,
-                title="Corrections applied",
-                status="completed",
-            )
-            await self._conn.session_update(session_id=ctx.session_id, update=review_update)
+            await self._thinking_status.stop("Corrections applied")
 
     async def handle_planning(
         self,
@@ -324,26 +304,14 @@ RULES:
         """
         ctx.state.set_current_action("Preparing approach")
 
-        review_block_id = f"plan_review_simple_{uuid4().hex[:8]}"
-        review_block = start_tool_call(
-            tool_call_id=review_block_id,
-            title="Preparing",
-            kind="think",
-            status="in_progress",
-        )
-        await self._conn.session_update(session_id=ctx.session_id, update=review_block)
+        await self._thinking_status.set_step(WorkflowStep.PLANNING_SIMPLE)
 
         report = await self._review_simple_plan(ctx.state, plan_response, ctx.session_id)
 
         if report.is_compliant:
             ctx.state.approved_plan = plan_response
 
-            review_update = update_tool_call(
-                tool_call_id=review_block_id,
-                title="Ready to proceed",
-                status="completed",
-            )
-            await self._conn.session_update(session_id=ctx.session_id, update=review_update)
+            await self._thinking_status.stop("Ready to proceed")
 
             await self._parse_and_send_plan(ctx.state, plan_response, ctx.session_id)
             await self._show_plan(ctx, plan_response)
@@ -351,12 +319,7 @@ RULES:
 
         # Simple task rejected - signal upgrade needed
         logger.info("Simple task rejected, upgrading to full review")
-        review_update = update_tool_call(
-            tool_call_id=review_block_id,
-            title="Refining approach",
-            status="in_progress",
-        )
-        await self._conn.session_update(session_id=ctx.session_id, update=review_update)
+        await self._thinking_status.set_step(WorkflowStep.PLANNING_REFINING)
         return False
 
     async def _review_full_plan_flow(
@@ -368,27 +331,15 @@ RULES:
         """
         classify_client = get_classify_client(self._classify_model)
 
-        planning_block_id = f"planning_{uuid4().hex[:8]}"
-        planning_block = start_tool_call(
-            tool_call_id=planning_block_id,
-            title="Analyzing request",
-            kind="think",
-            status="in_progress",
-        )
-        await self._conn.session_update(session_id=ctx.session_id, update=planning_block)
+        await self._thinking_status.set_step(WorkflowStep.PLANNING_FULL)
 
         while ctx.state.plan_review_attempts < ctx.state.max_plan_attempts:
             attempt = ctx.state.plan_review_attempts + 1
             remaining = ctx.state.max_plan_attempts - attempt
 
-            # Update progress title
-            title = self._get_planning_title(attempt)
-            planning_update = update_tool_call(
-                tool_call_id=planning_block_id,
-                title=title,
-                status="in_progress",
-            )
-            await self._conn.session_update(session_id=ctx.session_id, update=planning_update)
+            # Update progress step based on attempt
+            step = self._get_planning_step(attempt)
+            await self._thinking_status.set_step(step)
 
             ctx.state.set_current_action(f"Planning (iteration {attempt})")
             report = await self._review_plan(ctx.state, plan_response, ctx.session_id)
@@ -396,12 +347,7 @@ RULES:
             if report.is_compliant:
                 ctx.state.approved_plan = plan_response
 
-                planning_update = update_tool_call(
-                    tool_call_id=planning_block_id,
-                    title="Ready to implement",
-                    status="completed",
-                )
-                await self._conn.session_update(session_id=ctx.session_id, update=planning_update)
+                await self._thinking_status.stop("Ready to implement")
 
                 await self._parse_and_send_plan(ctx.state, plan_response, ctx.session_id)
                 await self._show_plan(ctx, plan_response)
@@ -412,9 +358,7 @@ RULES:
 
             # Check if max attempts reached
             if ctx.state.plan_review_attempts >= ctx.state.max_plan_attempts:
-                await self._handle_planning_escalation(
-                    ctx, planning_block_id, report, classify_client
-                )
+                await self._handle_planning_escalation(ctx, report, classify_client)
                 return False
 
             # Request revision
@@ -424,14 +368,14 @@ RULES:
 
         return False
 
-    def _get_planning_title(self, attempt: int) -> str:
-        """Get user-friendly planning title based on attempt number."""
-        titles = {
-            1: "Analyzing request",
-            2: "Refining approach",
-            3: "Revising solution",
+    def _get_planning_step(self, attempt: int) -> WorkflowStep:
+        """Get workflow step based on attempt number."""
+        steps = {
+            1: WorkflowStep.PLANNING_FULL,
+            2: WorkflowStep.PLANNING_REFINING,
+            3: WorkflowStep.PLANNING_REVISING,
         }
-        return titles.get(attempt, "Finalizing plan")
+        return steps.get(attempt, WorkflowStep.PLANNING_FINALIZING)
 
     def _log_violations(self, report: ComplianceReport) -> None:
         """Log plan violations for debugging."""
@@ -445,17 +389,11 @@ RULES:
     async def _handle_planning_escalation(
         self,
         ctx: WorkflowContext,
-        planning_block_id: str,
         report: ComplianceReport,
         classify_client: Any,
     ) -> None:
         """Handle planning escalation when max attempts reached."""
-        planning_update = update_tool_call(
-            tool_call_id=planning_block_id,
-            title="Need more information",
-            status="failed",
-        )
-        await self._conn.session_update(session_id=ctx.session_id, update=planning_update)
+        await self._thinking_status.stop("Need more information")
 
         # Build conversation context from session state
         conversation_context = self._build_conversation_context(ctx)
@@ -613,6 +551,8 @@ Provide your revised YAML plan now:
         ctx.state.phase = workflow_phase_enum.EXECUTING
         ctx.state.set_current_action("Implementing the plan")
 
+        await self._thinking_status.start(WorkflowStep.EXECUTING)
+
         execute_prompt = (
             f"Implement the approved plan. Proceed with the implementation now.\n\n"
             f"Plan:\n{ctx.state.approved_plan}"
@@ -644,14 +584,7 @@ Provide your revised YAML plan now:
                 ctx.state.phase = workflow_phase_enum.REVIEWING
                 ctx.state.set_current_action("Finalizing changes")
 
-                review_block_id = f"finalize_{uuid4().hex[:8]}"
-                review_block = start_tool_call(
-                    tool_call_id=review_block_id,
-                    title="Verifying changes",
-                    kind="think",
-                    status="in_progress",
-                )
-                await self._conn.session_update(session_id=ctx.session_id, update=review_block)
+                await self._thinking_status.set_step(WorkflowStep.REVIEWING)
 
                 report = await self._review_work(ctx.state, ctx.state.work_summary, ctx.session_id)
 
@@ -663,21 +596,11 @@ Provide your revised YAML plan now:
                         task.status = "completed"
                     await self._send_plan_update(ctx.state, ctx.session_id)
 
-                    review_update = update_tool_call(
-                        tool_call_id=review_block_id,
-                        title="Done",
-                        status="completed",
-                    )
-                    await self._conn.session_update(session_id=ctx.session_id, update=review_update)
+                    await self._thinking_status.stop("Done")
                     break
 
                 # Request revision
-                review_update = update_tool_call(
-                    tool_call_id=review_block_id,
-                    title="Applying adjustments",
-                    status="in_progress",
-                )
-                await self._conn.session_update(session_id=ctx.session_id, update=review_update)
+                await self._thinking_status.set_step(WorkflowStep.REVIEWING_CORRECTIONS)
                 logger.debug(f"Work review failed: {report.format()}")
 
                 revise_prompt = (
@@ -695,4 +618,5 @@ Provide your revised YAML plan now:
             else:
                 # Not ready - work is still in progress
                 logger.info("Work not ready for review, continuing execution")
+                await self._thinking_status.stop()
                 break
