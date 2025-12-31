@@ -1,9 +1,11 @@
 """Tests for delta.protocol module."""
 
+from unittest.mock import MagicMock, patch
 
 from delta.protocol import (
     compute_edit_result,
     format_tool_action,
+    is_working_tree_clean,
     read_file_content,
 )
 
@@ -97,3 +99,69 @@ class TestFormatToolAction:
         """Should handle MCP-prefixed tool names."""
         result = format_tool_action("mcp__acp__Bash", {"command": "ls"})
         assert result == "Execute shell command: ls"
+
+
+class TestIsWorkingTreeClean:
+    """Tests for is_working_tree_clean function."""
+
+    def test_given_clean_tree_when_check_then_returns_true(self):
+        """Given empty stdout, When is_working_tree_clean called, Then returns True."""
+        # Given
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+
+        # When
+        with patch("subprocess.run", return_value=mock_result):
+            result = is_working_tree_clean()
+
+        # Then
+        assert result is True
+
+    def test_given_dirty_tree_when_check_then_returns_false(self):
+        """Given file changes in stdout, When is_working_tree_clean called, Then returns False."""
+        # Given
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "M  src/delta/workflow.py\n"
+
+        # When
+        with patch("subprocess.run", return_value=mock_result):
+            result = is_working_tree_clean()
+
+        # Then
+        assert result is False
+
+    def test_given_git_unavailable_when_check_then_returns_false(self):
+        """Given FileNotFoundError, When is_working_tree_clean called, Then returns False."""
+        # Given/When
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            result = is_working_tree_clean()
+
+        # Then
+        assert result is False
+
+    def test_given_git_command_fails_when_check_then_returns_false(self):
+        """Given non-zero exit code, When is_working_tree_clean called, Then returns False."""
+        # Given
+        mock_result = MagicMock()
+        mock_result.returncode = 128
+
+        # When
+        with patch("subprocess.run", return_value=mock_result):
+            result = is_working_tree_clean()
+
+        # Then
+        assert result is False
+
+    def test_given_git_timeout_when_check_then_returns_false(self):
+        """Given git command times out, When is_working_tree_clean called, Then returns False."""
+        # Given
+        import subprocess
+
+        # When
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 5)):
+            result = is_working_tree_clean()
+
+        # Then
+        assert result is False

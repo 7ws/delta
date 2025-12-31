@@ -171,6 +171,9 @@ class ComplianceState:
     # Git state for compliance reviews
     git_state: str = ""
 
+    # Skip commit check - set when user requests to skip the commit requirement
+    skip_commit_check: bool = False
+
     @property
     def has_approved_plan(self) -> bool:
         """Return True if an approved plan exists for the current session."""

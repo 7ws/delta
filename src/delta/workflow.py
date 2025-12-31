@@ -22,6 +22,7 @@ from delta.llm import (
     get_classify_client,
     triage_user_message,
 )
+from delta.protocol import is_working_tree_clean
 from delta.thinking_status import ThinkingStatusManager, WorkflowStep
 
 if TYPE_CHECKING:
@@ -589,6 +590,24 @@ Provide your revised YAML plan now:
                 report = await self._review_work(ctx.state, ctx.state.work_summary, ctx.session_id)
 
                 if report.is_compliant:
+                    # Check if working tree is clean (changes committed)
+                    if not ctx.state.skip_commit_check and not is_working_tree_clean(ctx.state.cwd):
+                        logger.info("Work is compliant but uncommitted changes remain")
+                        await self._thinking_status.set_step(WorkflowStep.REVIEWING_CORRECTIONS)
+
+                        commit_prompt = (
+                            "Your work passed compliance review, but uncommitted changes remain. "
+                            "Create a commit with your changes before the task can be marked "
+                            "complete.\n\n"
+                            "Follow the commit guidelines in AGENTS.md section 4."
+                        )
+                        work_response = await self._call_inner_agent(
+                            ctx.state, commit_prompt, ctx.session_id
+                        )
+                        ctx.state.work_summary += f"\n\n[Commit requested]\n{work_response}"
+                        await self._update_task_progress(ctx.state, work_response, ctx.session_id)
+                        continue
+
                     ctx.state.phase = workflow_phase_enum.COMPLETE
 
                     # Mark all tasks completed

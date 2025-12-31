@@ -320,3 +320,45 @@ def capture_git_state(cwd: Path | None = None) -> str:
     except Exception as e:
         logger.warning(f"Failed to capture git state: {e}")
         return f"(Error capturing git state: {e})"
+
+
+def is_working_tree_clean(cwd: Path | None = None) -> bool:
+    """Check if the Git working tree has no uncommitted changes.
+
+    Runs git status --porcelain to determine if there are any staged,
+    unstaged, or untracked changes. Empty output indicates a clean tree.
+
+    Args:
+        cwd: Working directory (uses current directory if None).
+
+    Returns:
+        True if working tree is clean (no uncommitted changes).
+        False if working tree is dirty or git is unavailable.
+    """
+    import subprocess
+
+    work_dir = str(cwd) if cwd else None
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=work_dir,
+            timeout=5,
+        )
+
+        if result.returncode != 0:
+            return False
+
+        return not result.stdout.strip()
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Git status command timed out")
+        return False
+    except FileNotFoundError:
+        logger.warning("Git not installed")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to check working tree status: {e}")
+        return False

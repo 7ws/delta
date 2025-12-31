@@ -196,3 +196,133 @@ class TestWorkflowOrchestrator:
         assert orchestrator._get_planning_step(3) == WorkflowStep.PLANNING_REVISING
         assert orchestrator._get_planning_step(4) == WorkflowStep.PLANNING_FINALIZING
         assert orchestrator._get_planning_step(5) == WorkflowStep.PLANNING_FINALIZING
+
+
+class TestHandleReviewCycleCommitCheck:
+    """Tests for commit check in handle_review_cycle."""
+
+    @pytest.fixture
+    def mock_conn(self):
+        """Create a mock ACP connection."""
+        conn = MagicMock()
+        conn.session_update = AsyncMock()
+        return conn
+
+    @pytest.fixture
+    def mock_thinking_status(self):
+        """Create a mock ThinkingStatusManager."""
+        thinking_status = MagicMock(spec=ThinkingStatusManager)
+        thinking_status.start = AsyncMock()
+        thinking_status.stop = AsyncMock()
+        thinking_status.set_step = AsyncMock()
+        return thinking_status
+
+    @pytest.fixture
+    def mock_callbacks(self):
+        """Create mock callbacks."""
+        return {
+            "call_inner_agent": AsyncMock(return_value="Committed changes"),
+            "call_inner_agent_silent": AsyncMock(return_value="Plan text"),
+            "review_simple_plan": AsyncMock(),
+            "review_plan": AsyncMock(),
+            "review_work": AsyncMock(),
+            "check_ready_for_review": AsyncMock(return_value=True),
+            "parse_and_send_plan": AsyncMock(),
+            "send_plan_update": AsyncMock(),
+            "update_task_progress": AsyncMock(),
+        }
+
+    @pytest.fixture
+    def orchestrator(self, mock_conn, mock_thinking_status, mock_callbacks):
+        """Create a WorkflowOrchestrator instance."""
+        return WorkflowOrchestrator(
+            conn=mock_conn,
+            thinking_status=mock_thinking_status,
+            classify_model="haiku",
+            **mock_callbacks,
+        )
+
+    @pytest.fixture
+    def ctx_with_compliant_work(self):
+        """Create a workflow context with compliant work."""
+        state = MagicMock()
+        state.has_write_operations = True
+        state.write_blocked_for_plan = False
+        state.approved_plan = "Test plan"
+        state.plan_review_attempts = 0
+        state.max_plan_attempts = 5
+        state.work_summary = "Test work"
+        state.plan_tasks = [MagicMock(status="in_progress")]
+        state.skip_commit_check = False
+        state.cwd = None
+        return WorkflowContext(
+            prompt_text="Add a button",
+            prompt_content=[{"type": "text", "text": "Add a button"}],
+            has_images=False,
+            session_id="test-session",
+            state=state,
+        )
+
+    @pytest.mark.asyncio
+    async def test_given_dirty_tree_after_execution_when_review_cycle_then_requests_commit(
+        self, orchestrator, ctx_with_compliant_work, mock_callbacks
+    ):
+        """Given dirty tree and compliant report, When review_cycle, Then requests commit."""
+        # Given
+        mock_report = MagicMock()
+        mock_report.is_compliant = True
+        mock_callbacks["review_work"].return_value = mock_report
+
+        # Simulate: first call dirty, second call clean (after commit)
+        clean_call_count = [0]
+
+        def mock_is_clean(cwd=None):
+            clean_call_count[0] += 1
+            return clean_call_count[0] > 1
+
+        # When
+        with patch("delta.workflow.is_working_tree_clean", side_effect=mock_is_clean):
+            from delta.acp_server import WorkflowPhase
+            await orchestrator.handle_review_cycle(ctx_with_compliant_work, WorkflowPhase)
+
+        # Then
+        assert mock_callbacks["call_inner_agent"].call_count >= 1
+        call_args = mock_callbacks["call_inner_agent"].call_args_list[0]
+        assert "uncommitted changes remain" in call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_given_clean_tree_after_execution_when_review_cycle_then_marks_tasks_completed(
+        self, orchestrator, ctx_with_compliant_work, mock_callbacks
+    ):
+        """Given clean tree and compliant report, When review_cycle, Then marks tasks completed."""
+        # Given
+        mock_report = MagicMock()
+        mock_report.is_compliant = True
+        mock_callbacks["review_work"].return_value = mock_report
+
+        # When
+        with patch("delta.workflow.is_working_tree_clean", return_value=True):
+            from delta.acp_server import WorkflowPhase
+            await orchestrator.handle_review_cycle(ctx_with_compliant_work, WorkflowPhase)
+
+        # Then
+        assert ctx_with_compliant_work.state.plan_tasks[0].status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_given_skip_commit_flag_when_dirty_tree_then_allows_completion(
+        self, orchestrator, ctx_with_compliant_work, mock_callbacks
+    ):
+        """Given skip_commit_check True and dirty tree, When review_cycle, Then completes."""
+        # Given
+        ctx_with_compliant_work.state.skip_commit_check = True
+        mock_report = MagicMock()
+        mock_report.is_compliant = True
+        mock_callbacks["review_work"].return_value = mock_report
+
+        # When
+        with patch("delta.workflow.is_working_tree_clean", return_value=False):
+            from delta.acp_server import WorkflowPhase
+            await orchestrator.handle_review_cycle(ctx_with_compliant_work, WorkflowPhase)
+
+        # Then
+        assert ctx_with_compliant_work.state.plan_tasks[0].status == "completed"

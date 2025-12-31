@@ -139,14 +139,9 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 3.1 Branch Management
 
-- 3.1.1: Name branches as `<type>/<component>/<short-title>`. Use type values from section 5.
-- 3.1.2: Create branches from remote refs:
-  ```bash
-  git fetch <remote> main
-  git checkout --no-track <remote>/main -b <branch-name>
-  ```
-- 3.1.3: Use `gh` CLI for GitHub operations. Stop if not authenticated.
-- 3.1.4: Use `git reflog` when rewriting history, not memory.
+- 3.1.1: Commit directly to `main`. Do not create feature branches unless the user explicitly requests branching.
+- 3.1.2: Use `gh` CLI for GitHub operations. Stop if not authenticated.
+- 3.1.3: Use `git reflog` when rewriting history, not memory.
 
 ## 3.2 Staging Files
 
@@ -163,7 +158,7 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 - 3.3.3: Run linters before every commit, if linters are configured. Execute `make lint` or equivalent.
 - 3.3.4: Do not proceed with failing tests or linter errors.
 - 3.3.5: After each commit, verify atomicity by checking out that specific commit and running tests in isolation.
-- 3.3.6: Work is incomplete until committed. Do not declare work complete or ready for review without creating a commit.
+- 3.3.6: Work is incomplete until committed. Do not declare work complete or ready for review without creating a commit. Tasks require an associated commit before completion. The user may request skipping the commit requirement.
 
 
 ---
