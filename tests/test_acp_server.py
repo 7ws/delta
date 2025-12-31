@@ -122,3 +122,35 @@ class TestComplianceStateLifecycle:
         assert len(state.tool_call_history) == 2
         assert "[ALLOWED]" in state.tool_call_history[0]
         assert "[DENIED]" in state.tool_call_history[1]
+
+    def test_given_no_plan_when_has_approved_plan_then_returns_false(self) -> None:
+        # Given
+        from delta.acp_server import ComplianceState
+
+        state = ComplianceState()
+
+        # When/Then
+        assert state.has_approved_plan is False
+
+    def test_given_approved_plan_when_has_approved_plan_then_returns_true(self) -> None:
+        # Given
+        from delta.acp_server import ComplianceState
+
+        state = ComplianceState()
+        state.approved_plan = "goal: Test\ntasks:\n  - Do something"
+
+        # When/Then
+        assert state.has_approved_plan is True
+
+    def test_given_write_blocked_when_reset_then_clears_flag(self) -> None:
+        # Given
+        from delta.acp_server import ComplianceState
+
+        state = ComplianceState()
+        state.write_blocked_for_plan = True
+
+        # When
+        state.reset_for_new_prompt()
+
+        # Then
+        assert state.write_blocked_for_plan is False

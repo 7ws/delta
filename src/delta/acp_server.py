@@ -164,8 +164,16 @@ class ComplianceState:
     # Write operation tracking - ensures compliance review for ANY writes
     has_write_operations: bool = False
 
+    # Plan validation tracking - set when write is blocked due to missing plan
+    write_blocked_for_plan: bool = False
+
     # Git state for compliance reviews
     git_state: str = ""
+
+    @property
+    def has_approved_plan(self) -> bool:
+        """Return True if an approved plan exists for the current session."""
+        return bool(self.approved_plan)
 
     def record_tool_call(self, tool_description: str, allowed: bool) -> None:
         """Record a tool call in the session history."""
@@ -192,6 +200,7 @@ class ComplianceState:
         self.plan_tasks = [t for t in self.plan_tasks if t.status != "completed"]
         self.current_action = ""
         self.has_write_operations = False
+        self.write_blocked_for_plan = False
         # Note: git_state is preserved - it reflects the actual repository state
 
 
@@ -583,6 +592,39 @@ class DeltaAgent(Agent):
                     url = input_params.get("url", "")
                     tool_kind = "fetch"
                     tool_title = f"Fetch {url}"
+
+                # Plan validation: Block write operations without an approved plan
+                # Uses AI classification per architectural decision 13.1.1
+                if not state.has_approved_plan:
+                    try:
+                        classify_client = get_classify_client(self.classify_model)
+                        is_write = await asyncio.to_thread(
+                            classify_write_operation,
+                            classify_client,
+                            tool_name,
+                            tool_description,
+                        )
+                    except InvalidWriteClassificationResponse:
+                        # Default to write operation if classification fails (safe side)
+                        is_write = True
+                        logger.warning(
+                            f"Write classification failed, treating as write: {tool_description}"
+                        )
+
+                    if is_write:
+                        logger.warning(
+                            f"Write operation blocked - no approved plan: {tool_description}"
+                        )
+                        state.record_tool_call(tool_description, allowed=False)
+                        state.write_blocked_for_plan = True
+                        return PermissionResultDeny(
+                            message=(
+                                "Write operation requires approved plan. "
+                                "Create a plan before making changes. "
+                                "Output a YAML plan with goal, tasks, and files to modify."
+                            ),
+                            interrupt=True,
+                        )
 
                 # Send ToolCallStart to display the tool call in UI with diff
                 tool_start = start_tool_call(
@@ -1043,8 +1085,11 @@ class DeltaAgent(Agent):
 
             if not triage_result.needs_planning:
                 # Direct answer - no planning needed
-                await orchestrator.handle_direct_answer(ctx)
-                return PromptResponse(stop_reason="end_turn")
+                direct_completed = await orchestrator.handle_direct_answer(ctx)
+                if direct_completed:
+                    return PromptResponse(stop_reason="end_turn")
+                # Write was blocked - fall through to planning
+                logger.info("Direct answer blocked write, transitioning to planning")
 
             # === PLANNING, EXECUTION, AND REVIEW ===
             plan_approved = await orchestrator.handle_planning(

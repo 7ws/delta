@@ -151,14 +151,18 @@ class WorkflowOrchestrator:
         logger.info(f"Triage: Planning required, complexity={complexity}")
         return TriageResult(needs_planning=True, complexity=complexity)
 
-    async def handle_direct_answer(self, ctx: WorkflowContext) -> None:
+    async def handle_direct_answer(self, ctx: WorkflowContext) -> bool:
         """Handle direct answer flow (ANSWER triage result).
 
         Calls the inner agent directly without planning. If write operations
-        occur, triggers mandatory compliance review.
+        are blocked due to missing plan, signals that planning is required.
+        If write operations succeed, triggers mandatory compliance review.
 
         Args:
             ctx: Workflow context.
+
+        Returns:
+            True if direct answer completed, False if planning is required.
         """
         if ctx.has_images:
             response_text = await self._call_inner_agent(
@@ -169,10 +173,18 @@ class WorkflowOrchestrator:
                 ctx.state, ctx.prompt_text, ctx.session_id
             )
 
+        # Check if a write was blocked due to missing plan
+        if ctx.state.write_blocked_for_plan:
+            logger.info("ANSWER flow blocked write - transitioning to planning")
+            ctx.state.write_blocked_for_plan = False
+            return False
+
         # If writes occurred, compliance review is mandatory
         if ctx.state.has_write_operations:
             logger.info("ANSWER flow had write operations - triggering mandatory review")
             await self._review_answer_writes(ctx, response_text)
+
+        return True
 
     async def _review_answer_writes(self, ctx: WorkflowContext, response_text: str) -> None:
         """Review writes that occurred during direct answer flow.

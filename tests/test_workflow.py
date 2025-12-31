@@ -82,6 +82,7 @@ class TestWorkflowOrchestrator:
         """Create a workflow context."""
         state = MagicMock()
         state.has_write_operations = False
+        state.write_blocked_for_plan = False
         state.approved_plan = ""
         state.plan_review_attempts = 0
         state.max_plan_attempts = 5
@@ -118,9 +119,10 @@ class TestWorkflowOrchestrator:
     @pytest.mark.asyncio
     async def test_handle_direct_answer_no_writes(self, orchestrator, ctx, mock_callbacks):
         """Should call inner agent for direct answer without writes."""
-        await orchestrator.handle_direct_answer(ctx)
+        result = await orchestrator.handle_direct_answer(ctx)
 
         mock_callbacks["call_inner_agent"].assert_called_once()
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_handle_direct_answer_with_writes(
@@ -132,9 +134,40 @@ class TestWorkflowOrchestrator:
         mock_report.is_compliant = True
         mock_callbacks["review_work"].return_value = mock_report
 
-        await orchestrator.handle_direct_answer(ctx)
+        result = await orchestrator.handle_direct_answer(ctx)
 
         mock_callbacks["review_work"].assert_called_once()
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_handle_direct_answer_write_blocked_for_plan(
+        self, orchestrator, ctx, mock_callbacks
+    ):
+        """Should return False when write was blocked due to missing plan."""
+        # Given
+        ctx.state.write_blocked_for_plan = True
+
+        # When
+        result = await orchestrator.handle_direct_answer(ctx)
+
+        # Then
+        assert result is False
+        assert ctx.state.write_blocked_for_plan is False
+
+    @pytest.mark.asyncio
+    async def test_handle_direct_answer_write_blocked_skips_review(
+        self, orchestrator, ctx, mock_callbacks
+    ):
+        """Should not trigger review when write was blocked for plan."""
+        # Given
+        ctx.state.write_blocked_for_plan = True
+        ctx.state.has_write_operations = False
+
+        # When
+        await orchestrator.handle_direct_answer(ctx)
+
+        # Then
+        mock_callbacks["review_work"].assert_not_called()
 
     def test_build_plan_prompt(self, orchestrator):
         """Should build a valid plan prompt."""
