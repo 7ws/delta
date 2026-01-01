@@ -182,3 +182,16 @@ class TestTemplateCompliance:
                 assert term not in template_lower, (
                     f"{template_name} contains forbidden term: {term}"
                 )
+
+    def test_simple_plan_review_evaluates_documentation_requirements(self):
+        """SIMPLE_PLAN_REVIEW_TEMPLATE must not exclude documentation from evaluation."""
+        # Given
+        from delta.prompts import SIMPLE_PLAN_REVIEW_TEMPLATE
+
+        # When
+        template_lower = SIMPLE_PLAN_REVIEW_TEMPLATE.lower()
+
+        # Then
+        assert "documentation requirements" not in template_lower, (
+            "SIMPLE_PLAN_REVIEW_TEMPLATE excludes documentation from evaluation"
+        )

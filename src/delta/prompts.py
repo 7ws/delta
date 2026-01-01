@@ -69,7 +69,6 @@ Do NOT evaluate:
 - Every guideline in AGENTS.md
 - Minor stylistic concerns
 - Hypothetical edge cases
-- Documentation requirements for simple operations
 
 ## Required Output Format
 

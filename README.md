@@ -70,7 +70,7 @@ User Prompt ───▶ Triage
 2. **Complexity classification**: Haiku classifies the task as SIMPLE, MODERATE, or COMPLEX to determine review depth.
 3. **Plan**: The inner agent creates a YAML plan for the requested work.
 4. **Plan review**: Review depth depends on task complexity:
-   - **SIMPLE** (git operations, config changes, file renames): Quick sanity check only. Approved if the plan addresses the request without obvious safety issues.
+   - **SIMPLE** (git operations, config changes, file renames): Quick validation only. Approved if the plan addresses the request without obvious safety issues.
    - **MODERATE/COMPLEX** (features, bug fixes, architectural changes): Full guideline evaluation. The inner agent revises until every section scores 5/5 (up to 5 attempts). After 5 failures, Delta checks conversation context to infer intent from recent actions (commits, tests, file changes). If context is sufficient, Delta responds based on that context. Otherwise, it escalates with specific questions.
 5. **Execute**: The inner agent implements the approved plan. Tool calls require user permission.
 6. **Readiness check**: Haiku evaluates whether the work is ready for compliance review.
@@ -83,11 +83,11 @@ Delta applies proportional review depth based on task complexity:
 
 | Complexity | Examples | Review Type |
 |------------|----------|-------------|
-| SIMPLE | Git rewrites, file renames, config changes, running commands | Quick sanity check (single attempt) |
+| SIMPLE | Git rewrites, file renames, config changes, running commands | Quick validation (single attempt) |
 | MODERATE | Adding features to existing patterns, bug fixes, refactoring | Full guideline review (up to 5 attempts) |
 | COMPLEX | New systems, architectural changes, ambiguous requirements | Full guideline review (up to 5 attempts) |
 
-Simple tasks that fail the sanity check are automatically upgraded to full review.
+Simple tasks that fail validation are automatically upgraded to full review.
 
 ### Scoring
 
