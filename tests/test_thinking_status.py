@@ -217,3 +217,97 @@ class TestThinkingStatusManager:
 
         # And no session_update should be called
         mock_conn.session_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_with_keep_elapsed_formats_title_with_elapsed_time(
+        self, manager, mock_conn
+    ):
+        """Given a running manager, when stop(keep_elapsed=True), then title includes elapsed."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        await asyncio.sleep(0.1)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.stop(keep_elapsed=True)
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "Analyzing request" in update.title
+        assert "s)" in update.title
+
+    @pytest.mark.asyncio
+    async def test_stop_with_keep_elapsed_false_uses_final_title_only(
+        self, manager, mock_conn
+    ):
+        """Given a running manager, when stop(final_title=...), then title is exactly that."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.stop(final_title="Done")
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert update.title == "Done"
+
+    @pytest.mark.asyncio
+    async def test_stop_with_keep_elapsed_true_ignores_final_title(
+        self, manager, mock_conn
+    ):
+        """Given keep_elapsed=True and final_title, when stop, then final_title is ignored."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        await asyncio.sleep(0.1)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.stop(final_title="Ignored", keep_elapsed=True)
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "Ignored" not in update.title
+        assert "Analyzing request" in update.title
+
+    @pytest.mark.asyncio
+    async def test_stop_without_start_with_keep_elapsed_is_safe(self, manager, mock_conn):
+        """Given a manager not started, when stop(keep_elapsed=True), then no error occurs."""
+        # When/Then - should not raise
+        await manager.stop(keep_elapsed=True)
+
+        # And no session_update should be called
+        mock_conn.session_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_with_zero_elapsed_time(self, manager, mock_conn):
+        """Given a manager just started, when stop(keep_elapsed=True), then shows 0s."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.stop(keep_elapsed=True)
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "(0s)" in update.title
+
+    @pytest.mark.asyncio
+    async def test_stop_at_exact_step_estimate_boundary(self, manager, mock_conn):
+        """Given step_elapsed equals estimate, when stop(keep_elapsed=True), then no remaining."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.stop(keep_elapsed=True)
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "remaining" not in update.title

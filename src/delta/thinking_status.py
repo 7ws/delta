@@ -165,11 +165,17 @@ class ThinkingStatusManager:
         await self._conn.session_update(session_id=self._session_id, update=tool_update)
         logger.debug(f"Updated thinking step: {step.description}")
 
-    async def stop(self, final_title: str | None = None) -> None:
+    async def stop(
+        self,
+        final_title: str | None = None,
+        *,
+        keep_elapsed: bool = False,
+    ) -> None:
         """Stop the thinking status indicator.
 
         Args:
-            final_title: Optional final title to display.
+            final_title: Optional final title to display. Ignored if keep_elapsed is True.
+            keep_elapsed: If True, use step description with elapsed time as final title.
         """
         if not self._running:
             return
@@ -182,7 +188,13 @@ class ThinkingStatusManager:
                 await self._update_task
             self._update_task = None
 
-        title = final_title if final_title else self._current_step.description
+        if keep_elapsed:
+            elapsed = int(self.elapsed_seconds)
+            title = f"{self._current_step.description} ({elapsed}s)"
+        elif final_title:
+            title = final_title
+        else:
+            title = self._current_step.description
         tool_update = update_tool_call(
             tool_call_id=self._tool_call_id,
             title=title,

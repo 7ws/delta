@@ -348,7 +348,9 @@ RULES:
             if report.is_compliant:
                 ctx.state.approved_plan = plan_response
 
-                await self._thinking_status.stop("Ready to implement")
+                await self._thinking_status.stop(keep_elapsed=True)
+                chunk = update_agent_message(text_block("Ready to implement"))
+                await self._conn.session_update(session_id=ctx.session_id, update=chunk)
 
                 await self._parse_and_send_plan(ctx.state, plan_response, ctx.session_id)
                 await self._show_plan(ctx, plan_response)
