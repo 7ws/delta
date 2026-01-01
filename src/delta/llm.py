@@ -118,12 +118,6 @@ class InvalidTriageResponse(Exception):
     pass
 
 
-class InvalidComplexityResponse(Exception):
-    """Raised when task complexity classification returns an invalid response."""
-
-    pass
-
-
 class InvalidWriteClassificationResponse(Exception):
     """Raised when write operation classification returns an invalid response."""
 
@@ -295,91 +289,6 @@ def classify_write_operation(
             )
 
     raise InvalidWriteClassificationResponse("Unexpected exit from write classification loop")
-
-
-def classify_task_complexity(
-    client: ClaudeCodeClient, message: str, max_retries: int = 2
-) -> str:
-    """Classify the complexity of a task to determine review depth.
-
-    Args:
-        client: Claude Code client (Haiku recommended for speed).
-        message: The user's message to analyze.
-        max_retries: Maximum retry attempts for invalid responses.
-
-    Returns:
-        One of: "SIMPLE", "MODERATE", "COMPLEX"
-
-    Raises:
-        InvalidComplexityResponse: If response is invalid after retries.
-    """
-    prompt = dedent(f"""\
-        Classify this task by complexity to determine appropriate review depth.
-
-        User message:
-        {message}
-
-        SIMPLE: Single-step operations with clear, well-understood outcomes.
-        Examples:
-        - Git history rewrites (rebase, filter-repo, amend)
-        - File or variable renames
-        - Configuration changes with known values
-        - Standard git operations (commit, push, branch)
-        - Adding imports or simple one-line fixes
-        - Running commands (build, test, lint)
-
-        MODERATE: Multi-step tasks following established patterns.
-        Examples:
-        - Adding a feature using existing patterns in the codebase
-        - Bug fixes requiring investigation and code changes
-        - Refactoring code within a single module
-        - Adding tests for existing functionality
-        - Updating documentation
-
-        COMPLEX: Tasks requiring architectural decisions or new patterns.
-        Examples:
-        - Designing new systems or modules
-        - Changing application architecture
-        - Integrating new external services
-        - Tasks with ambiguous requirements needing clarification
-        - Cross-cutting changes affecting multiple systems
-
-        Reply with exactly one word: SIMPLE, MODERATE, or COMPLEX\
-    """)
-
-    system = (
-        "You classify task complexity. "
-        "Reply with exactly one word: SIMPLE, MODERATE, or COMPLEX"
-    )
-
-    for attempt in range(max_retries + 1):
-        response = client.complete(prompt=prompt, system=system)
-        response_upper = response.upper().strip()
-
-        if response_upper == "SIMPLE" or response_upper.startswith("SIMPLE\n"):
-            return "SIMPLE"
-        if response_upper == "MODERATE" or response_upper.startswith("MODERATE\n"):
-            return "MODERATE"
-        if response_upper == "COMPLEX" or response_upper.startswith("COMPLEX\n"):
-            return "COMPLEX"
-
-        if attempt < max_retries:
-            prompt = dedent(f"""\
-                Your previous response was invalid: "{response}"
-
-                You MUST reply with exactly one word: SIMPLE, MODERATE, or COMPLEX
-
-                User message to analyze:
-                {message}
-
-                Reply with exactly one word: SIMPLE, MODERATE, or COMPLEX\
-            """)
-        else:
-            raise InvalidComplexityResponse(
-                f"Invalid complexity response after {max_retries + 1} attempts: {response}"
-            )
-
-    raise InvalidComplexityResponse("Unexpected exit from complexity classification loop")
 
 
 def triage_user_message(

@@ -6,65 +6,15 @@ import pytest
 
 from delta.llm import (
     ClaudeCodeClient,
-    InvalidComplexityResponse,
     InvalidPlanParseResponse,
     InvalidTaskDuplicateResponse,
     InvalidWriteClassificationResponse,
-    classify_task_complexity,
     classify_task_duplicate,
     classify_write_operation,
     detect_task_progress,
     generate_clarifying_questions,
     parse_plan_tasks,
 )
-
-
-class TestClassifyTaskComplexity:
-    """Tests for task complexity classification."""
-
-    @pytest.mark.parametrize(
-        "response,expected",
-        [
-            ("SIMPLE", "SIMPLE"),
-            ("MODERATE", "MODERATE"),
-            ("COMPLEX", "COMPLEX"),
-            ("simple", "SIMPLE"),  # lowercase
-            ("SIMPLE\n", "SIMPLE"),  # with newline
-        ],
-    )
-    def test_given_valid_response_when_classified_then_returns_expected(
-        self, response: str, expected: str
-    ) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = response
-
-        # When
-        result = classify_task_complexity(client, "Do something")
-
-        # Then
-        assert result == expected
-
-    def test_given_invalid_then_valid_response_when_classified_then_retries(self) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.side_effect = ["INVALID", "MODERATE"]
-
-        # When
-        result = classify_task_complexity(client, "Fix bug")
-
-        # Then
-        assert result == "MODERATE"
-        assert client.complete.call_count == 2
-
-    def test_given_all_invalid_responses_when_classified_then_raises_error(self) -> None:
-        # Given
-        client = MagicMock(spec=ClaudeCodeClient)
-        client.complete.return_value = "INVALID"
-
-        # When/Then
-        with pytest.raises(InvalidComplexityResponse):
-            classify_task_complexity(client, "Do something", max_retries=2)
 
 
 class TestClassifyWriteOperation:

@@ -6,11 +6,10 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from delta.compliance import ComplianceReport, parse_compliance_response, parse_simple_plan_response
+from delta.compliance import ComplianceReport, parse_compliance_response
 from delta.prompts import (
     build_batch_work_review_prompt,
     build_plan_review_prompt,
-    build_simple_plan_review_prompt,
 )
 from delta.utils import parse_with_retry
 
@@ -64,48 +63,6 @@ class ReviewPhaseHandler:
             prompt=prompt,
             system=system,
         )
-
-    async def review_simple_plan(
-        self,
-        user_prompt: str,
-        plan: str,
-        git_state: str | None = None,
-    ) -> ComplianceReport:
-        """Review a simple plan with lightweight validation.
-
-        Simple tasks bypass full guideline evaluation and receive only a sanity
-        check for obvious issues. Git state is checked to ensure plans do not
-        modify files on dirty working trees without user consent.
-
-        Args:
-            user_prompt: The user's request.
-            plan: The proposed implementation plan.
-            git_state: Current Git state (branch, working tree status).
-
-        Returns:
-            ComplianceReport with approved/rejected status.
-
-        Raises:
-            ParseError: If parsing fails after retries.
-        """
-        prompt = build_simple_plan_review_prompt(user_prompt, plan, git_state)
-
-        async def llm_call(p: str) -> str:
-            return await self._llm_call(
-                p, "You are a quick validator. Output only valid JSON."
-            )
-
-        try:
-            report = await parse_with_retry(
-                llm_call=llm_call,
-                initial_prompt=prompt,
-                parser=parse_simple_plan_response,
-                max_retries=self._max_parse_retries,
-            )
-            logger.info(f"Simple plan review: compliant={report.is_compliant}")
-            return report
-        except RuntimeError as e:
-            raise ParseError(str(e)) from e
 
     async def review_plan(
         self,

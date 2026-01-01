@@ -15,9 +15,7 @@ from acp import text_block, update_agent_message
 
 from delta.compliance import ComplianceReport
 from delta.llm import (
-    InvalidComplexityResponse,
     InvalidTriageResponse,
-    classify_task_complexity,
     generate_clarifying_questions,
     get_classify_client,
     triage_user_message,
@@ -74,7 +72,6 @@ class WorkflowOrchestrator:
         *,
         call_inner_agent: Callable[..., Coroutine[Any, Any, str]],
         call_inner_agent_silent: Callable[..., Coroutine[Any, Any, str]],
-        review_simple_plan: Callable[..., Coroutine[Any, Any, ComplianceReport]],
         review_plan: Callable[..., Coroutine[Any, Any, ComplianceReport]],
         review_work: Callable[..., Coroutine[Any, Any, ComplianceReport]],
         check_ready_for_review: Callable[..., Coroutine[Any, Any, bool]],
@@ -87,10 +84,9 @@ class WorkflowOrchestrator:
         Args:
             conn: ACP client connection.
             thinking_status: Manager for real-time thinking status updates.
-            classify_model: Model for triage and complexity classification.
+            classify_model: Model for triage classification.
             call_inner_agent: Callback to call inner agent with streaming output.
             call_inner_agent_silent: Callback to call inner agent silently.
-            review_simple_plan: Callback to review a simple plan.
             review_plan: Callback to review a plan with full compliance check.
             review_work: Callback to review completed work.
             check_ready_for_review: Callback to check if work is ready for review.
@@ -105,7 +101,6 @@ class WorkflowOrchestrator:
         # Callbacks to DeltaAgent methods
         self._call_inner_agent = call_inner_agent
         self._call_inner_agent_silent = call_inner_agent_silent
-        self._review_simple_plan = review_simple_plan
         self._review_plan = review_plan
         self._review_work = review_work
         self._check_ready_for_review = check_ready_for_review
@@ -142,18 +137,8 @@ class WorkflowOrchestrator:
             logger.info("Triage: Direct answer (no planning)")
             return TriageResult(needs_planning=False)
 
-        # Classify complexity for planning
-        try:
-            complexity = await asyncio.to_thread(
-                classify_task_complexity,
-                classify_client,
-                ctx.prompt_text,
-            )
-        except InvalidComplexityResponse:
-            complexity = "MODERATE"
-
-        logger.info(f"Triage: Planning required, complexity={complexity}")
-        return TriageResult(needs_planning=True, complexity=complexity)
+        logger.info("Triage: Planning required")
+        return TriageResult(needs_planning=True)
 
     async def handle_direct_answer(self, ctx: WorkflowContext) -> bool:
         """Handle direct answer flow (ANSWER triage result).
@@ -253,14 +238,7 @@ class WorkflowOrchestrator:
                 ctx.state, plan_prompt, ctx.session_id
             )
 
-        # Review based on complexity
-        if complexity == "SIMPLE":
-            approved = await self._review_simple_plan_flow(ctx, plan_response)
-            if approved:
-                return True
-            # Upgrade to full review if simple plan rejected
-            complexity = "MODERATE"
-
+        # All tasks go through full compliance review
         if not ctx.state.approved_plan:
             return await self._review_full_plan_flow(ctx, plan_response)
 
@@ -295,33 +273,6 @@ RULES:
 - Include documentation updates if docs exist for the affected area
 - Include tests for new features or bug fixes
 """
-
-    async def _review_simple_plan_flow(
-        self, ctx: WorkflowContext, plan_response: str
-    ) -> bool:
-        """Handle simple plan review flow.
-
-        Returns True if plan was approved, False to upgrade to full review.
-        """
-        ctx.state.set_current_action("Preparing approach")
-
-        await self._thinking_status.set_step(WorkflowStep.PLANNING_SIMPLE)
-
-        report = await self._review_simple_plan(ctx.state, plan_response, ctx.session_id)
-
-        if report.is_compliant:
-            ctx.state.approved_plan = plan_response
-
-            await self._thinking_status.stop("Ready to proceed")
-
-            await self._parse_and_send_plan(ctx.state, plan_response, ctx.session_id)
-            await self._show_plan(ctx, plan_response)
-            return True
-
-        # Simple task rejected - signal upgrade needed
-        logger.info("Simple task rejected, upgrading to full review")
-        await self._thinking_status.set_step(WorkflowStep.PLANNING_REFINING)
-        return False
 
     async def _review_full_plan_flow(
         self, ctx: WorkflowContext, plan_response: str

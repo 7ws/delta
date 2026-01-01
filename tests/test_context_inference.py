@@ -124,8 +124,7 @@ class TestBuildConversationContext:
         return {
             "call_inner_agent": AsyncMock(return_value="Response"),
             "call_inner_agent_silent": AsyncMock(return_value="Plan"),
-            "review_simple_plan": AsyncMock(),
-            "review_plan": AsyncMock(),
+                        "review_plan": AsyncMock(),
             "review_work": AsyncMock(),
             "check_ready_for_review": AsyncMock(return_value=True),
             "parse_and_send_plan": AsyncMock(),
@@ -265,8 +264,7 @@ class TestBuildContextInferencePrompt:
         return {
             "call_inner_agent": AsyncMock(return_value="Response"),
             "call_inner_agent_silent": AsyncMock(return_value="Plan"),
-            "review_simple_plan": AsyncMock(),
-            "review_plan": AsyncMock(),
+                        "review_plan": AsyncMock(),
             "review_work": AsyncMock(),
             "check_ready_for_review": AsyncMock(return_value=True),
             "parse_and_send_plan": AsyncMock(),

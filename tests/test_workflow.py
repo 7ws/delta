@@ -69,7 +69,6 @@ class TestWorkflowOrchestrator:
         return {
             "call_inner_agent": AsyncMock(return_value="Response text"),
             "call_inner_agent_silent": AsyncMock(return_value="Plan text"),
-            "review_simple_plan": AsyncMock(),
             "review_plan": AsyncMock(),
             "review_work": AsyncMock(),
             "check_ready_for_review": AsyncMock(return_value=True),
@@ -118,14 +117,10 @@ class TestWorkflowOrchestrator:
     @pytest.mark.asyncio
     async def test_triage_plan(self, orchestrator, ctx):
         """Should return needs_planning=True for PLAN triage."""
-        with (
-            patch("delta.workflow.triage_user_message", return_value="PLAN"),
-            patch("delta.workflow.classify_task_complexity", return_value="MODERATE"),
-        ):
+        with patch("delta.workflow.triage_user_message", return_value="PLAN"):
             result = await orchestrator.triage(ctx)
 
         assert result.needs_planning
-        assert result.complexity == "MODERATE"
 
     @pytest.mark.asyncio
     async def test_handle_direct_answer_no_writes(self, orchestrator, ctx, mock_callbacks):
@@ -223,7 +218,6 @@ class TestHandleReviewCycleCommitCheck:
         return {
             "call_inner_agent": AsyncMock(return_value="Committed changes"),
             "call_inner_agent_silent": AsyncMock(return_value="Plan text"),
-            "review_simple_plan": AsyncMock(),
             "review_plan": AsyncMock(),
             "review_work": AsyncMock(),
             "check_ready_for_review": AsyncMock(return_value=True),

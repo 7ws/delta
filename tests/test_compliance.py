@@ -8,9 +8,7 @@ from delta.compliance import (
     ComplianceReport,
     Score,
     SectionScore,
-    build_simple_plan_review_prompt,
     parse_compliance_response,
-    parse_simple_plan_response,
 )
 from delta.guidelines import parse_agents_md
 
@@ -182,72 +180,3 @@ class TestComplianceReportFormat:
         # Then
         assert "§1 Writing Style" in formatted
         assert "§2 Technical Conduct" in formatted
-
-
-class TestBuildSimplePlanReviewPrompt:
-    """Tests for simple plan review prompt generation."""
-
-    def test_given_user_prompt_and_plan_when_built_then_includes_both(self) -> None:
-        # Given
-        user_prompt = "Rewrite git history with new author"
-        plan = "goal: Rewrite commits\ntasks:\n  - Run git filter-repo"
-
-        # When
-        prompt = build_simple_plan_review_prompt(user_prompt, plan)
-
-        # Then
-        assert user_prompt in prompt
-        assert plan in prompt
-        assert "SIMPLE task" in prompt
-        assert "quick validation" in prompt
-
-
-class TestParseSimplePlanResponse:
-    """Tests for simple plan review response parsing."""
-
-    def test_given_approved_response_when_parsed_then_report_is_compliant(self) -> None:
-        # Given
-        response = '{"approved": true, "reason": "Plan addresses the request"}'
-
-        # When
-        report = parse_simple_plan_response(response)
-
-        # Then
-        assert report.is_compliant
-        assert len(report.section_scores) == 1
-        assert report.section_scores[0].section_name == "Simple Review"
-
-    def test_given_rejected_response_when_parsed_then_report_is_not_compliant(
-        self,
-    ) -> None:
-        # Given
-        response = '{"approved": false, "reason": "Plan has safety concerns"}'
-
-        # When
-        report = parse_simple_plan_response(response)
-
-        # Then
-        assert not report.is_compliant
-        assert report.section_scores[0].guideline_scores[0].score == Score.NONE
-
-    def test_given_json_in_code_block_when_parsed_then_extracts_correctly(self) -> None:
-        # Given
-        response = """```json
-{"approved": true, "reason": "Looks good"}
-```"""
-
-        # When
-        report = parse_simple_plan_response(response)
-
-        # Then
-        assert report.is_compliant
-
-    def test_given_invalid_json_when_parsed_then_raises_error(self) -> None:
-        # Given
-        response = "This is not JSON"
-
-        # When/Then
-        with pytest.raises(ValueError, match="No JSON found"):
-            parse_simple_plan_response(response)
-
-

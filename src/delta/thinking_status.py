@@ -27,7 +27,6 @@ class WorkflowStep(Enum):
     """Workflow steps with descriptions and time estimates."""
 
     TRIAGE = ("Analyzing request", 2)
-    PLANNING_SIMPLE = ("Preparing", 3)
     PLANNING_FULL = ("Analyzing request", 10)
     PLANNING_REFINING = ("Refining approach", 8)
     PLANNING_REVISING = ("Revising solution", 8)

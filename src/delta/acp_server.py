@@ -280,20 +280,6 @@ class DeltaAgent(Agent):
             raise RuntimeError("Failed to load AGENTS.md")
         return ReviewPhaseHandler(self.llm_client, self.agents_doc)
 
-    async def _review_simple_plan(
-        self,
-        state: ComplianceState,
-        plan: str,
-        session_id: str,
-    ) -> ComplianceReport:
-        """Review a simple plan with lightweight validation including Git state check."""
-        handler = self._get_review_handler()
-        report = await handler.review_simple_plan(
-            state.current_user_prompt, plan, git_state=state.git_state
-        )
-        state.plan_review_attempts += 1
-        return report
-
     async def _review_plan(
         self,
         state: ComplianceState,
@@ -1010,7 +996,6 @@ class DeltaAgent(Agent):
             classify_model=self.classify_model,
             call_inner_agent=self._call_inner_agent,
             call_inner_agent_silent=self._call_inner_agent_silent,
-            review_simple_plan=self._review_simple_plan,
             review_plan=self._review_plan,
             review_work=self._review_work,
             check_ready_for_review=self._check_ready_for_review,

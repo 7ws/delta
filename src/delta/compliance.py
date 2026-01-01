@@ -118,36 +118,6 @@ class ComplianceReport:
         return "\n".join(lines)
 
 
-def parse_simple_plan_response(response: str) -> ComplianceReport:
-    """Parse simple plan review response.
-
-    Args:
-        response: Raw response from the simple plan reviewer.
-
-    Returns:
-        ComplianceReport with approved/rejected status.
-    """
-    json_str = extract_json(response)
-    data = json.loads(json_str)
-
-    report = ComplianceReport(proposed_action=data.get("reason", "Simple task"))
-
-    is_approved = data.get("approved", False)
-
-    section = SectionScore(section_number=0, section_name="Simple Review")
-    section.guideline_scores.append(
-        GuidelineScore(
-            guideline_id="simple",
-            guideline_text="Simple task sanity check",
-            score=Score.FULL if is_approved else Score.NONE,
-            justification=data.get("reason", ""),
-        )
-    )
-    report.section_scores.append(section)
-
-    return report
-
-
 def parse_compliance_response(response: str, agents_doc: AgentsDocument) -> ComplianceReport:
     """Parse the compliance reviewer's response into a report.
 
@@ -222,5 +192,4 @@ def parse_compliance_response(response: str, agents_doc: AgentsDocument) -> Comp
 from delta.prompts import (  # noqa: E402, F401
     build_batch_work_review_prompt,
     build_plan_review_prompt,
-    build_simple_plan_review_prompt,
 )

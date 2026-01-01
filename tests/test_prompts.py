@@ -6,7 +6,6 @@ from delta.prompts import (
     PromptTemplate,
     build_batch_work_review_prompt,
     build_plan_review_prompt,
-    build_simple_plan_review_prompt,
 )
 
 
@@ -43,26 +42,6 @@ class TestPromptTemplate:
         """Should return placeholder for single request."""
         result = PromptTemplate.format_user_history(["Only request"])
         assert "No prior requests" in result
-
-
-class TestBuildSimplePlanReviewPrompt:
-    """Tests for build_simple_plan_review_prompt function."""
-
-    def test_includes_user_prompt(self):
-        """Should include user prompt in output."""
-        result = build_simple_plan_review_prompt("Add a button", "1. Add button")
-        assert "Add a button" in result
-
-    def test_includes_plan(self):
-        """Should include plan in output."""
-        result = build_simple_plan_review_prompt("Request", "My plan here")
-        assert "My plan here" in result
-
-    def test_requests_json_output(self):
-        """Should request JSON format."""
-        result = build_simple_plan_review_prompt("Request", "Plan")
-        assert "json" in result.lower()
-        assert "approved" in result.lower()
 
 
 class TestBuildPlanReviewPrompt:
@@ -143,21 +122,12 @@ class TestTemplateCompliance:
         assert "Key execution guidelines" not in BATCH_WORK_REVIEW_TEMPLATE
         assert "Key guidelines" not in BATCH_WORK_REVIEW_TEMPLATE
 
-    def test_simple_plan_review_no_section_highlighting(self):
-        """SIMPLE_PLAN_REVIEW_TEMPLATE must not contain section-specific highlighting."""
-        # Given
-        from delta.prompts import SIMPLE_PLAN_REVIEW_TEMPLATE
-
-        # Then
-        assert "Key guidelines" not in SIMPLE_PLAN_REVIEW_TEMPLATE
-
     def test_no_inclusive_language_violations(self):
         """Templates must not contain inclusive language violations per section 1.5.2."""
         # Given
         from delta.prompts import (
             BATCH_WORK_REVIEW_TEMPLATE,
             PLAN_REVIEW_TEMPLATE,
-            SIMPLE_PLAN_REVIEW_TEMPLATE,
         )
 
         forbidden_terms = [
@@ -170,7 +140,6 @@ class TestTemplateCompliance:
         ]
 
         templates = [
-            ("SIMPLE_PLAN_REVIEW_TEMPLATE", SIMPLE_PLAN_REVIEW_TEMPLATE),
             ("PLAN_REVIEW_TEMPLATE", PLAN_REVIEW_TEMPLATE),
             ("BATCH_WORK_REVIEW_TEMPLATE", BATCH_WORK_REVIEW_TEMPLATE),
         ]
@@ -182,16 +151,3 @@ class TestTemplateCompliance:
                 assert term not in template_lower, (
                     f"{template_name} contains forbidden term: {term}"
                 )
-
-    def test_simple_plan_review_evaluates_documentation_requirements(self):
-        """SIMPLE_PLAN_REVIEW_TEMPLATE must not exclude documentation from evaluation."""
-        # Given
-        from delta.prompts import SIMPLE_PLAN_REVIEW_TEMPLATE
-
-        # When
-        template_lower = SIMPLE_PLAN_REVIEW_TEMPLATE.lower()
-
-        # Then
-        assert "documentation requirements" not in template_lower, (
-            "SIMPLE_PLAN_REVIEW_TEMPLATE excludes documentation from evaluation"
-        )
