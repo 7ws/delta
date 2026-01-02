@@ -77,6 +77,7 @@ class ThinkingStatusManager:
     """
 
     UPDATE_INTERVAL = 0.5
+    MAX_DESCRIPTION_LENGTH = 100
 
     def __init__(
         self,
@@ -95,6 +96,7 @@ class ThinkingStatusManager:
         self._start_time: float = 0.0
         self._step_start_time: float = 0.0
         self._current_step: WorkflowStep = WorkflowStep.TRIAGE
+        self._custom_description: str | None = None
         self._update_task: asyncio.Task[None] | None = None
         self._running = False
 
@@ -119,6 +121,13 @@ class ThinkingStatusManager:
             elapsed_seconds=self.elapsed_seconds,
             step_elapsed_seconds=self.step_elapsed_seconds,
         )
+
+    def _format_current_title(self) -> str:
+        """Format title using custom description or step description."""
+        elapsed = int(self.elapsed_seconds)
+        if self._custom_description:
+            return f"{self._custom_description} ({elapsed}s)"
+        return self._get_status().format_title()
 
     async def start(self, step: WorkflowStep = WorkflowStep.TRIAGE) -> None:
         """Start the thinking status indicator.
@@ -155,6 +164,7 @@ class ThinkingStatusManager:
 
         self._current_step = step
         self._step_start_time = time.monotonic()
+        self._custom_description = None
 
         status = self._get_status()
         tool_update = update_tool_call(
@@ -164,6 +174,32 @@ class ThinkingStatusManager:
         )
         await self._conn.session_update(session_id=self._session_id, update=tool_update)
         logger.debug(f"Updated thinking step: {step.description}")
+
+    async def set_description(self, description: str) -> None:
+        """Update the status with a custom description.
+
+        Args:
+            description: Custom description to display. Empty string falls back
+                to current step description. Truncated to MAX_DESCRIPTION_LENGTH.
+        """
+        if not self._running:
+            return
+
+        if not description:
+            self._custom_description = None
+        elif len(description) > self.MAX_DESCRIPTION_LENGTH:
+            self._custom_description = description[: self.MAX_DESCRIPTION_LENGTH - 3] + "..."
+        else:
+            self._custom_description = description
+
+        title = self._format_current_title()
+        tool_update = update_tool_call(
+            tool_call_id=self._tool_call_id,
+            title=title,
+            status="in_progress",
+        )
+        await self._conn.session_update(session_id=self._session_id, update=tool_update)
+        logger.debug(f"Updated thinking description: {title}")
 
     async def stop(
         self,
@@ -211,10 +247,10 @@ class ThinkingStatusManager:
             if not self._running:
                 break
 
-            status = self._get_status()
+            title = self._format_current_title()
             tool_update = update_tool_call(
                 tool_call_id=self._tool_call_id,
-                title=status.format_title(),
+                title=title,
                 status="in_progress",
             )
             try:

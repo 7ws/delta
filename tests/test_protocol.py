@@ -54,40 +54,83 @@ class TestComputeEditResult:
 class TestFormatToolAction:
     """Tests for format_tool_action function."""
 
-    def test_formats_bash_command(self):
-        """Should format Bash tool call."""
+    def test_formats_bash_git_status(self):
+        """Should format git status command contextually."""
         result = format_tool_action("Bash", {"command": "git status"})
-        assert result == "Execute shell command: git status"
+        assert result == "Checking git status"
+
+    def test_formats_bash_git_commit(self):
+        """Should format git commit command contextually."""
+        result = format_tool_action("Bash", {"command": "git commit -m 'test'"})
+        assert result == "Committing changes"
+
+    def test_formats_bash_git_add(self):
+        """Should format git add command contextually."""
+        result = format_tool_action("Bash", {"command": "git add file.py"})
+        assert result == "Staging changes"
+
+    def test_formats_bash_git_push(self):
+        """Should format git push command contextually."""
+        result = format_tool_action("Bash", {"command": "git push origin main"})
+        assert result == "Pushing to remote"
+
+    def test_formats_bash_pytest(self):
+        """Should format pytest command contextually."""
+        result = format_tool_action("Bash", {"command": "pytest tests/"})
+        assert result == "Running tests"
+
+    def test_formats_bash_make(self):
+        """Should format make command contextually."""
+        result = format_tool_action("Bash", {"command": "make lint"})
+        assert result == "Running make: lint"
+
+    def test_formats_bash_generic(self):
+        """Should format generic bash command with truncation."""
+        result = format_tool_action("Bash", {"command": "ls -la"})
+        assert result == "Executing: ls -la"
+
+    def test_formats_bash_long_command(self):
+        """Should truncate long commands."""
+        long_cmd = "find / -name '*.py' -exec grep -l 'pattern' {} \\; -print -verbose"
+        result = format_tool_action("Bash", {"command": long_cmd})
+        assert len(result) <= 65  # "Executing: " prefix (11) + 47 truncated + "..." (3)
+        assert "..." in result
 
     def test_formats_write_file(self):
-        """Should format Write tool call."""
+        """Should format Write tool with filename only."""
         result = format_tool_action("Write", {"file_path": "/path/to/file.py"})
-        assert result == "Write file: /path/to/file.py"
+        assert result == "Writing file.py"
 
     def test_formats_edit_file(self):
-        """Should format Edit tool call."""
+        """Should format Edit tool with filename only."""
         result = format_tool_action("Edit", {"file_path": "/path/to/file.py"})
-        assert result == "Edit file: /path/to/file.py"
+        assert result == "Editing file.py"
 
     def test_formats_read_file(self):
-        """Should format Read tool call."""
+        """Should format Read tool with filename only."""
         result = format_tool_action("Read", {"file_path": "/path/to/file.py"})
-        assert result == "Read file: /path/to/file.py"
+        assert result == "Reading file.py"
 
     def test_formats_glob_search(self):
         """Should format Glob tool call."""
         result = format_tool_action("Glob", {"pattern": "**/*.py"})
-        assert result == "Search files matching: **/*.py"
+        assert result == "Finding files: **/*.py"
 
     def test_formats_grep_search(self):
         """Should format Grep tool call."""
         result = format_tool_action("Grep", {"pattern": "TODO"})
-        assert result == "Search content matching: TODO"
+        assert result == "Searching for: TODO"
 
     def test_formats_web_fetch(self):
-        """Should format WebFetch tool call."""
-        result = format_tool_action("WebFetch", {"url": "https://example.com"})
-        assert result == "Fetch URL: https://example.com"
+        """Should format WebFetch tool call with truncation."""
+        result = format_tool_action("WebFetch", {"url": "https://example.com/path"})
+        assert "Fetching:" in result
+        assert "example.com" in result
+
+    def test_formats_task_tool(self):
+        """Should format Task tool with description."""
+        result = format_tool_action("Task", {"description": "Search for patterns"})
+        assert result == "Delegating: Search for patterns"
 
     def test_formats_unknown_tool(self):
         """Should format unknown tool with generic format."""
@@ -97,8 +140,23 @@ class TestFormatToolAction:
 
     def test_handles_mcp_prefixed_tools(self):
         """Should handle MCP-prefixed tool names."""
-        result = format_tool_action("mcp__acp__Bash", {"command": "ls"})
-        assert result == "Execute shell command: ls"
+        result = format_tool_action("mcp__acp__Bash", {"command": "git diff"})
+        assert result == "Viewing changes"
+
+    def test_formats_bash_empty_command(self):
+        """Should handle empty command gracefully."""
+        result = format_tool_action("Bash", {"command": ""})
+        assert result == "Execute command"
+
+    def test_formats_npm_command(self):
+        """Should format npm command contextually."""
+        result = format_tool_action("Bash", {"command": "npm install"})
+        assert result == "Running npm: install"
+
+    def test_formats_uv_command(self):
+        """Should format uv command contextually."""
+        result = format_tool_action("Bash", {"command": "uv sync"})
+        assert result == "Installing packages"
 
 
 class TestIsWorkingTreeClean:

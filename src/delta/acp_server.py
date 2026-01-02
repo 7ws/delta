@@ -154,6 +154,7 @@ class ComplianceState:
     # Session state
     agents_doc: AgentsDocument | None = None
     inner_client: ClaudeSDKClient | None = None
+    thinking_status: ThinkingStatusManager | None = None
     cwd: Path | None = None
     current_user_prompt: str = ""
     user_request_history: list[str] = field(default_factory=list)
@@ -776,6 +777,10 @@ class DeltaAgent(Agent):
                 tool_input = pre_tool_input["tool_input"]
                 tool_description = format_tool_action(tool_name, tool_input)
 
+                # Update thinking status with contextual description
+                if state.thinking_status is not None:
+                    await state.thinking_status.set_description(tool_description)
+
                 # Record in history (allowed=True since this hook doesn't block)
                 # For tools that go through can_use_tool, the history will be
                 # updated again with the actual allow/deny decision
@@ -1053,6 +1058,7 @@ class DeltaAgent(Agent):
 
         # Create thinking status manager for real-time feedback
         thinking_status = ThinkingStatusManager(self._conn, session_id)
+        state.thinking_status = thinking_status
 
         # Create orchestrator with callbacks
         orchestrator = self._get_workflow_orchestrator(session_id, thinking_status)

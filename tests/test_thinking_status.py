@@ -338,3 +338,127 @@ class TestThinkingStatusManager:
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
         assert "remaining" not in update.title
+
+    @pytest.mark.asyncio
+    async def test_set_description_updates_title(self, manager, mock_conn):
+        """Given a running manager, when set_description is called, then title updates."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.set_description("Reading config.py")
+
+        # Then
+        mock_conn.session_update.assert_called_once()
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "Reading config.py" in update.title
+
+        # Clean up
+        await manager.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_description_preserves_elapsed_time(self, manager, mock_conn):
+        """Given running manager, when set_description called, then elapsed time preserved."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        await asyncio.sleep(0.1)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.set_description("Running tests")
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "s)" in update.title  # Elapsed time in format "(Xs)"
+
+        # Clean up
+        await manager.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_description_empty_falls_back_to_step(self, manager, mock_conn):
+        """Given a running manager, when set_description with empty string, then uses step."""
+        # Given
+        await manager.start(WorkflowStep.EXECUTING)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.set_description("")
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "Implementing" in update.title
+
+        # Clean up
+        await manager.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_description_truncates_long_description(self, manager, mock_conn):
+        """Given a very long description, when set_description, then truncates to max length."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        mock_conn.session_update.reset_mock()
+        long_description = "A" * 150  # Longer than MAX_DESCRIPTION_LENGTH (100)
+
+        # When
+        await manager.set_description(long_description)
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        # Should be truncated to 97 chars + "..."
+        assert len(update.title.split(" (")[0]) <= 100
+        assert "..." in update.title
+
+        # Clean up
+        await manager.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_description_handles_special_characters(self, manager, mock_conn):
+        """Given description with special chars, when set_description, then handles correctly."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.set_description("Reading /path/to/file.py")
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "/path/to/file.py" in update.title
+
+        # Clean up
+        await manager.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_step_clears_custom_description(self, manager, mock_conn):
+        """Given custom description set, when set_step, then description is cleared."""
+        # Given
+        await manager.start(WorkflowStep.TRIAGE)
+        await manager.set_description("Custom description")
+        mock_conn.session_update.reset_mock()
+
+        # When
+        await manager.set_step(WorkflowStep.EXECUTING)
+
+        # Then
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert "Implementing" in update.title
+        assert "Custom description" not in update.title
+
+        # Clean up
+        await manager.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_description_without_start_is_safe(self, manager, mock_conn):
+        """Given a manager not started, when set_description, then no error occurs."""
+        # When/Then - should not raise
+        await manager.set_description("Some description")
+
+        # And no session_update should be called
+        mock_conn.session_update.assert_not_called()

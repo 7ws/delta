@@ -197,6 +197,67 @@ def extract_prompt_text(blocks: list[PromptBlock], cwd: Path | None = None) -> s
     return "\n\n".join(text_parts)
 
 
+def _format_file_path(file_path: str) -> str:
+    """Format a file path for display, extracting the filename."""
+    if not file_path:
+        return ""
+    # Extract just the filename for cleaner display
+    from pathlib import Path
+
+    return Path(file_path).name
+
+
+def _format_bash_command(command: str) -> str:
+    """Format a bash command for display with contextual description."""
+    if not command:
+        return "Execute command"
+
+    # Git operations
+    if command.startswith("git "):
+        if "commit" in command:
+            return "Committing changes"
+        if "add" in command:
+            return "Staging changes"
+        if "push" in command:
+            return "Pushing to remote"
+        if "pull" in command:
+            return "Pulling from remote"
+        if "status" in command:
+            return "Checking git status"
+        if "diff" in command:
+            return "Viewing changes"
+        if "log" in command:
+            return "Viewing commit history"
+        return f"Running git: {command[:50]}"
+
+    # Test operations
+    if "pytest" in command or "test" in command:
+        return "Running tests"
+
+    # Build operations
+    if "make" in command:
+        return f"Running make: {command.split()[1] if len(command.split()) > 1 else 'default'}"
+
+    # Package managers
+    if command.startswith(("npm ", "yarn ", "pnpm ")):
+        parts = command.split()
+        subcommand = parts[1] if len(parts) > 1 else ""
+        return f"Running {parts[0]}: {subcommand}"
+    if command.startswith(("pip ", "uv ")):
+        return "Installing packages"
+
+    # Server operations
+    if "serve" in command or "server" in command or "start" in command:
+        return "Starting server"
+    if "restart" in command:
+        return "Restarting service"
+
+    # Default: truncate long commands
+    if len(command) > 50:
+        return f"Executing: {command[:47]}..."
+    return f"Executing: {command}"
+
+
 def format_tool_action(tool_name: str, input_params: dict[str, Any]) -> str:
     """Format a tool call as a human-readable action description.
 
@@ -207,14 +268,18 @@ def format_tool_action(tool_name: str, input_params: dict[str, Any]) -> str:
     Returns:
         Action description in imperative form for compliance review.
     """
+    def _fmt_file(p: dict[str, Any], verb: str) -> str:
+        return f"{verb} {_format_file_path(p.get('file_path', ''))}"
+
     tool_formats: dict[tuple[str, ...], Callable[[dict[str, Any]], str]] = {
-        ("Bash", "mcp__acp__Bash"): lambda p: f"Execute shell command: {p.get('command', '')}",
-        ("Write", "mcp__acp__Write"): lambda p: f"Write file: {p.get('file_path', '')}",
-        ("Edit", "mcp__acp__Edit"): lambda p: f"Edit file: {p.get('file_path', '')}",
-        ("Read", "mcp__acp__Read"): lambda p: f"Read file: {p.get('file_path', '')}",
-        ("Glob",): lambda p: f"Search files matching: {p.get('pattern', '')}",
-        ("Grep",): lambda p: f"Search content matching: {p.get('pattern', '')}",
-        ("WebFetch",): lambda p: f"Fetch URL: {p.get('url', '')}",
+        ("Bash", "mcp__acp__Bash"): lambda p: _format_bash_command(p.get("command", "")),
+        ("Write", "mcp__acp__Write"): lambda p: _fmt_file(p, "Writing"),
+        ("Edit", "mcp__acp__Edit"): lambda p: _fmt_file(p, "Editing"),
+        ("Read", "mcp__acp__Read"): lambda p: _fmt_file(p, "Reading"),
+        ("Glob",): lambda p: f"Finding files: {p.get('pattern', '')}",
+        ("Grep",): lambda p: f"Searching for: {p.get('pattern', '')}",
+        ("WebFetch",): lambda p: f"Fetching: {p.get('url', '')[:50]}",
+        ("Task",): lambda p: f"Delegating: {p.get('description', 'subtask')[:40]}",
     }
 
     for names, formatter in tool_formats.items():
@@ -222,8 +287,10 @@ def format_tool_action(tool_name: str, input_params: dict[str, Any]) -> str:
             return formatter(input_params)
 
     # Generic format for unknown tools
-    params_str = ", ".join(f"{k}={v!r}" for k, v in input_params.items())
-    return f"Call {tool_name}({params_str})"
+    params_str = ", ".join(f"{k}={v!r}" for k, v in list(input_params.items())[:2])
+    if len(params_str) > 40:
+        params_str = params_str[:37] + "..."
+    return f"{tool_name}: {params_str}"
 
 
 def capture_git_state(cwd: Path | None = None) -> str:
