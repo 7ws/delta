@@ -193,6 +193,123 @@ class TestWorkflowOrchestrator:
         assert orchestrator._get_planning_step(5) == WorkflowStep.PLANNING_FINALIZING
 
 
+class TestHandlePlanningEscalation:
+    """Tests for _handle_planning_escalation status transitions."""
+
+    @pytest.fixture
+    def mock_conn(self):
+        """Create a mock ACP connection."""
+        conn = MagicMock()
+        conn.session_update = AsyncMock()
+        return conn
+
+    @pytest.fixture
+    def mock_thinking_status(self):
+        """Create a mock ThinkingStatusManager."""
+        thinking_status = MagicMock(spec=ThinkingStatusManager)
+        thinking_status.start = AsyncMock()
+        thinking_status.stop = AsyncMock()
+        thinking_status.set_step = AsyncMock()
+        return thinking_status
+
+    @pytest.fixture
+    def mock_callbacks(self):
+        """Create mock callbacks."""
+        return {
+            "call_inner_agent": AsyncMock(return_value="Inferred response"),
+            "call_inner_agent_silent": AsyncMock(return_value="Plan text"),
+            "review_plan": AsyncMock(),
+            "review_work": AsyncMock(),
+            "check_ready_for_review": AsyncMock(return_value=True),
+            "parse_and_send_plan": AsyncMock(),
+            "send_plan_update": AsyncMock(),
+            "update_task_progress": AsyncMock(),
+        }
+
+    @pytest.fixture
+    def orchestrator(self, mock_conn, mock_thinking_status, mock_callbacks):
+        """Create a WorkflowOrchestrator instance."""
+        return WorkflowOrchestrator(
+            conn=mock_conn,
+            thinking_status=mock_thinking_status,
+            classify_model="haiku",
+            **mock_callbacks,
+        )
+
+    @pytest.fixture
+    def ctx(self):
+        """Create a workflow context for escalation tests."""
+        state = MagicMock()
+        state.tool_call_history = []
+        state.user_request_history = []
+        return WorkflowContext(
+            prompt_text="Add a button",
+            prompt_content=[{"type": "text", "text": "Add a button"}],
+            has_images=False,
+            session_id="test-session",
+            state=state,
+        )
+
+    @pytest.fixture
+    def mock_report(self):
+        """Create a mock compliance report with violations."""
+        report = MagicMock()
+        report.failing_sections = []
+        return report
+
+    @pytest.mark.asyncio
+    async def test_escalation_sets_planning_escalating_step(
+        self, orchestrator, ctx, mock_report, mock_thinking_status
+    ):
+        """Given escalation, when handling, then sets PLANNING_ESCALATING step."""
+        # Given
+        classify_client = MagicMock()
+
+        # When
+        with patch("delta.workflow.generate_clarifying_questions", return_value=[]):
+            await orchestrator._handle_planning_escalation(
+                ctx, mock_report, classify_client
+            )
+
+        # Then
+        mock_thinking_status.set_step.assert_called_with(WorkflowStep.PLANNING_ESCALATING)
+
+    @pytest.mark.asyncio
+    async def test_escalation_stops_status_after_questions(
+        self, orchestrator, ctx, mock_report, mock_thinking_status
+    ):
+        """Given questions generated, when escalation completes, then stops status."""
+        # Given
+        classify_client = MagicMock()
+        questions = ["What feature do you want?", "Where should it go?"]
+
+        # When
+        with patch("delta.workflow.generate_clarifying_questions", return_value=questions):
+            await orchestrator._handle_planning_escalation(
+                ctx, mock_report, classify_client
+            )
+
+        # Then
+        mock_thinking_status.stop.assert_called_with("Need more information")
+
+    @pytest.mark.asyncio
+    async def test_escalation_stops_status_after_inference(
+        self, orchestrator, ctx, mock_report, mock_thinking_status
+    ):
+        """Given no questions needed, when escalation completes, then stops status."""
+        # Given
+        classify_client = MagicMock()
+
+        # When
+        with patch("delta.workflow.generate_clarifying_questions", return_value=[]):
+            await orchestrator._handle_planning_escalation(
+                ctx, mock_report, classify_client
+            )
+
+        # Then
+        mock_thinking_status.stop.assert_called_with("Information gathered")
+
+
 class TestHandleReviewCycleCommitCheck:
     """Tests for commit check in handle_review_cycle."""
 

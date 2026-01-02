@@ -347,7 +347,7 @@ RULES:
         classify_client: Any,
     ) -> None:
         """Handle planning escalation when max attempts reached."""
-        await self._thinking_status.stop("Need more information")
+        await self._thinking_status.set_step(WorkflowStep.PLANNING_ESCALATING)
 
         # Build conversation context from session state
         conversation_context = self._build_conversation_context(ctx)
@@ -373,12 +373,14 @@ RULES:
             logger.info("Context sufficient - inferring intent instead of asking questions")
             infer_prompt = self._build_context_inference_prompt(ctx)
             await self._call_inner_agent(ctx.state, infer_prompt, ctx.session_id)
+            await self._thinking_status.stop("Information gathered")
             return
 
         numbered_questions = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
         escalate_msg = f"\n\n**Additional information required:**\n\n{numbered_questions}\n"
         chunk = update_agent_message(text_block(escalate_msg))
         await self._conn.session_update(session_id=ctx.session_id, update=chunk)
+        await self._thinking_status.stop("Need more information")
 
     def _build_conversation_context(self, ctx: WorkflowContext) -> str:
         """Build conversation context string from session state.

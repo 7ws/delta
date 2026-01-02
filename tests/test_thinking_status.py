@@ -39,6 +39,33 @@ class TestWorkflowStep:
             assert isinstance(step.estimated_seconds, int)
             assert step.estimated_seconds > 0
 
+    def test_planning_escalating_has_valid_description(self):
+        """Given PLANNING_ESCALATING, when accessing description, then returns non-empty string."""
+        # When
+        description = WorkflowStep.PLANNING_ESCALATING.description
+
+        # Then
+        assert isinstance(description, str)
+        assert len(description) > 0
+
+    def test_planning_escalating_has_positive_estimate(self):
+        """Given PLANNING_ESCALATING, when accessing estimate, then returns positive int."""
+        # When
+        estimate = WorkflowStep.PLANNING_ESCALATING.estimated_seconds
+
+        # Then
+        assert isinstance(estimate, int)
+        assert estimate > 0
+
+    def test_planning_escalating_differs_from_finalizing(self):
+        """Given PLANNING_ESCALATING and PLANNING_FINALIZING, then descriptions differ."""
+        # When
+        escalating_desc = WorkflowStep.PLANNING_ESCALATING.description
+        finalizing_desc = WorkflowStep.PLANNING_FINALIZING.description
+
+        # Then
+        assert escalating_desc != finalizing_desc
+
 
 class TestThinkingStatus:
     """Tests for ThinkingStatus dataclass."""
