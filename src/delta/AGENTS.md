@@ -145,11 +145,14 @@ Follow the [Red Hat Technical Writing Style Guide](https://stylepedia.net/style/
 
 ## 3.2 Staging Files
 
-- 3.2.1: Before staging, inspect changes with `git status` and `git diff <file>` for each modified file.
-- 3.2.2: Stage files and directories explicitly by name using `git add <file>` or `git add <directory>`.
-- 3.2.3: Do not use `git add -A` or `git add .`.
-- 3.2.4: When a modified file contains unrelated changes, stage only relevant hunks using `printf 'y\nn\nq\n' | git add -p <file>`.
-- 3.2.5: Do not commit unrelated changes. If the diff contains changes outside the scope of the current task, unstage them or stage only relevant hunks. This rule has no exceptions.
+- 3.2.1: Before staging, inspect changes with `git status` and `git --no-pager diff <file>` for each modified file.
+- 3.2.2: Stage files explicitly by name:
+  - `git add <file>` when all changes in the file relate to the current task
+  - `git add <directory>` when all changes in all files under the directory relate to the current task
+  - `printf 'y\nn\nq\n' | git add -p <file>` when a file contains mixed changes; respond `y` to related hunks and `n` to unrelated hunks
+- 3.2.3: Do not use `git add -A`, `git add .`, or `git add --all`. These commands bypass explicit review.
+- 3.2.4: Every staged change must relate to the current task. The staging method is secondary to intentional review.
+- 3.2.5: When uncertain whether changes relate to the task, ask the user before staging.
 
 ## 3.3 Pre-Commit Verification
 
