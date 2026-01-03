@@ -12,7 +12,7 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from acp import start_tool_call, update_tool_call
@@ -21,6 +21,23 @@ if TYPE_CHECKING:
     from acp.interfaces import Client
 
 logger = logging.getLogger(__name__)
+
+STATUS_BAR_META: dict[str, Any] = {"ui": {"component": "status_bar"}}
+
+
+def _merge_status_bar_meta(existing_meta: Any) -> dict[str, Any]:
+    """Merge status bar metadata with any existing metadata dictionary."""
+    merged: dict[str, Any] = {}
+    if isinstance(existing_meta, dict):
+        merged.update(existing_meta)
+
+    ui_meta = merged.get("ui")
+    if isinstance(ui_meta, dict):
+        merged["ui"] = {**ui_meta, **STATUS_BAR_META["ui"]}
+    else:
+        merged["ui"] = dict(STATUS_BAR_META["ui"])
+
+    return merged
 
 
 class WorkflowStep(Enum):
@@ -129,6 +146,12 @@ class ThinkingStatusManager:
             return f"{self._custom_description} ({elapsed}s)"
         return self._get_status().format_title()
 
+    def _apply_status_bar_meta(self, tool_message: Any) -> Any:
+        """Attach status bar metadata without removing existing fields."""
+        merged_meta = _merge_status_bar_meta(getattr(tool_message, "field_meta", None))
+        setattr(tool_message, "field_meta", merged_meta)
+        return tool_message
+
     async def start(self, step: WorkflowStep = WorkflowStep.TRIAGE) -> None:
         """Start the thinking status indicator.
 
@@ -142,11 +165,13 @@ class ThinkingStatusManager:
         self._running = True
 
         status = self._get_status()
-        tool_call = start_tool_call(
-            tool_call_id=self._tool_call_id,
-            title=status.format_title(),
-            kind="think",
-            status="in_progress",
+        tool_call = self._apply_status_bar_meta(
+            start_tool_call(
+                tool_call_id=self._tool_call_id,
+                title=status.format_title(),
+                kind="think",
+                status="in_progress",
+            )
         )
         await self._conn.session_update(session_id=self._session_id, update=tool_call)
 
@@ -167,10 +192,12 @@ class ThinkingStatusManager:
         self._custom_description = None
 
         status = self._get_status()
-        tool_update = update_tool_call(
-            tool_call_id=self._tool_call_id,
-            title=status.format_title(),
-            status="in_progress",
+        tool_update = self._apply_status_bar_meta(
+            update_tool_call(
+                tool_call_id=self._tool_call_id,
+                title=status.format_title(),
+                status="in_progress",
+            )
         )
         await self._conn.session_update(session_id=self._session_id, update=tool_update)
         logger.debug(f"Updated thinking step: {step.description}")
@@ -193,10 +220,12 @@ class ThinkingStatusManager:
             self._custom_description = description
 
         title = self._format_current_title()
-        tool_update = update_tool_call(
-            tool_call_id=self._tool_call_id,
-            title=title,
-            status="in_progress",
+        tool_update = self._apply_status_bar_meta(
+            update_tool_call(
+                tool_call_id=self._tool_call_id,
+                title=title,
+                status="in_progress",
+            )
         )
         await self._conn.session_update(session_id=self._session_id, update=tool_update)
         logger.debug(f"Updated thinking description: {title}")
@@ -231,10 +260,12 @@ class ThinkingStatusManager:
             title = final_title
         else:
             title = self._current_step.description
-        tool_update = update_tool_call(
-            tool_call_id=self._tool_call_id,
-            title=title,
-            status="completed",
+        tool_update = self._apply_status_bar_meta(
+            update_tool_call(
+                tool_call_id=self._tool_call_id,
+                title=title,
+                status="completed",
+            )
         )
         await self._conn.session_update(session_id=self._session_id, update=tool_update)
         logger.debug(f"Stopped thinking status: {title}")
@@ -248,15 +279,15 @@ class ThinkingStatusManager:
                 break
 
             title = self._format_current_title()
-            tool_update = update_tool_call(
-                tool_call_id=self._tool_call_id,
-                title=title,
-                status="in_progress",
+            tool_update = self._apply_status_bar_meta(
+                update_tool_call(
+                    tool_call_id=self._tool_call_id,
+                    title=title,
+                    status="in_progress",
+                )
             )
             try:
-                await self._conn.session_update(
-                    session_id=self._session_id, update=tool_update
-                )
+                await self._conn.session_update(session_id=self._session_id, update=tool_update)
             except Exception as e:
                 logger.warning(f"Failed to update thinking status: {e}")
                 break

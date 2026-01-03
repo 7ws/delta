@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from delta.thinking_status import ThinkingStatus, ThinkingStatusManager, WorkflowStep
+from delta.thinking_status import (
+    STATUS_BAR_META,
+    ThinkingStatus,
+    ThinkingStatusManager,
+    WorkflowStep,
+)
 
 
 class TestWorkflowStep:
@@ -130,6 +135,8 @@ class TestThinkingStatusManager:
         mock_conn.session_update.assert_called_once()
         call_args = mock_conn.session_update.call_args
         assert call_args.kwargs["session_id"] == "test-session"
+        update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
 
         # Clean up
         await manager.stop()
@@ -146,6 +153,9 @@ class TestThinkingStatusManager:
 
         # Then
         mock_conn.session_update.assert_called_once()
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
 
     @pytest.mark.asyncio
     async def test_set_step_updates_status(self, manager, mock_conn):
@@ -159,6 +169,9 @@ class TestThinkingStatusManager:
 
         # Then
         mock_conn.session_update.assert_called_once()
+        call_args = mock_conn.session_update.call_args
+        update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
 
         # Clean up
         await manager.stop()
@@ -193,6 +206,9 @@ class TestThinkingStatusManager:
         # Should have at least 2 updates in 1 second (0.5s interval)
         update_count = mock_conn.session_update.call_count - initial_call_count
         assert update_count >= 2
+        for call in mock_conn.session_update.call_args_list[initial_call_count:]:
+            update = call.kwargs["update"]
+            assert update.field_meta == STATUS_BAR_META
 
         # Clean up
         await manager.stop()
@@ -246,9 +262,7 @@ class TestThinkingStatusManager:
         mock_conn.session_update.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_stop_with_keep_elapsed_formats_title_with_elapsed_time(
-        self, manager, mock_conn
-    ):
+    async def test_stop_with_keep_elapsed_formats_title_with_elapsed_time(self, manager, mock_conn):
         """Given a running manager, when stop(keep_elapsed=True), then title includes elapsed."""
         # Given
         await manager.start(WorkflowStep.TRIAGE)
@@ -261,13 +275,12 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "Analyzing request" in update.title
         assert "s)" in update.title
 
     @pytest.mark.asyncio
-    async def test_stop_with_keep_elapsed_false_uses_final_title_only(
-        self, manager, mock_conn
-    ):
+    async def test_stop_with_keep_elapsed_false_uses_final_title_only(self, manager, mock_conn):
         """Given a running manager, when stop(final_title=...), then title is exactly that."""
         # Given
         await manager.start(WorkflowStep.TRIAGE)
@@ -279,12 +292,11 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert update.title == "Done"
 
     @pytest.mark.asyncio
-    async def test_stop_with_keep_elapsed_true_ignores_final_title(
-        self, manager, mock_conn
-    ):
+    async def test_stop_with_keep_elapsed_true_ignores_final_title(self, manager, mock_conn):
         """Given keep_elapsed=True and final_title, when stop, then final_title is ignored."""
         # Given
         await manager.start(WorkflowStep.TRIAGE)
@@ -297,6 +309,7 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "Ignored" not in update.title
         assert "Analyzing request" in update.title
 
@@ -322,6 +335,7 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "(0s)" in update.title
 
     @pytest.mark.asyncio
@@ -337,6 +351,7 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "remaining" not in update.title
 
     @pytest.mark.asyncio
@@ -353,6 +368,7 @@ class TestThinkingStatusManager:
         mock_conn.session_update.assert_called_once()
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "Reading config.py" in update.title
 
         # Clean up
@@ -372,6 +388,7 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "s)" in update.title  # Elapsed time in format "(Xs)"
 
         # Clean up
@@ -390,6 +407,7 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "Implementing" in update.title
 
         # Clean up
@@ -409,7 +427,7 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
-        # Should be truncated to 97 chars + "..."
+        assert update.field_meta == STATUS_BAR_META
         assert len(update.title.split(" (")[0]) <= 100
         assert "..." in update.title
 
@@ -429,6 +447,7 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "/path/to/file.py" in update.title
 
         # Clean up
@@ -448,6 +467,7 @@ class TestThinkingStatusManager:
         # Then
         call_args = mock_conn.session_update.call_args
         update = call_args.kwargs["update"]
+        assert update.field_meta == STATUS_BAR_META
         assert "Implementing" in update.title
         assert "Custom description" not in update.title
 
